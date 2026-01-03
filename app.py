@@ -68,10 +68,10 @@ CFG = {
     # =====================================================
     # [ STEP 8 ] 실행 안전장치 (LIMITS / STALE / SPREAD)
     # =====================================================
-    "17_ENTRY_MAX_PER_CYCLE": 1,
+    "17_ENTRY_MAX_PER_CYCLE": 2,
     "18_MAX_ENTRIES_PER_DAY": 20,
-    "19_DATA_STALE_BLOCK": True,                 # ✅ ON
-    "20_EXECUTION_SPREAD_GUARD_ENABLE": True,    # ✅ ON
+    "19_DATA_STALE_BLOCK": False,                 # ✅ ON
+    "20_EXECUTION_SPREAD_GUARD_ENABLE": False,    # ✅ ON
 
     # =====================================================
     # [ STEP 9 ] 재진입 관리 · 후보 정리
@@ -79,10 +79,10 @@ CFG = {
     "21_ENTRY_COOLDOWN_BARS": 0,
     "22_ENTRY_COOLDOWN_AFTER_EXIT": 0,
     "23_REENTRY_SAME_REASON_BLOCK": False,
-    "24_ENTRY_LOOKBACK_BARS": 2,
+    "24_ENTRY_LOOKBACK_BARS": 100,
     "25_REENTRY_PRICE_TOL_PCT": 100,
-    "26_CAND_POOL_TTL_BARS": 50,
-    "27_CAND_POOL_MAX_SIZE": 50,
+    "26_CAND_POOL_TTL_BARS": 100,
+    "27_CAND_POOL_MAX_SIZE": 100,
     "28_CAND_MIN_GAP_BARS": 0,
 
     # =====================================================
