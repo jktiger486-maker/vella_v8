@@ -1240,13 +1240,19 @@ def app_run_live(logger=print):
 
 
             # ====================================================
-            # BAR ADVANCE — 5m KLINE CLOSE ONLY
+            # BAR ADVANCE — 5m KLINE CLOSE ONLY (LIVE SAFE)
             # ====================================================
-            cur_bar_time = market_core.get("time")
+            kline_rows = market.get("kline_rows") or []
+            last_close_time = None
 
-            if state.get("_last_bar_time") != cur_bar_time:
-                state["_last_bar_time"] = cur_bar_time
-                state["bars"] += 1
+            if kline_rows:
+                last_close_time = int(kline_rows[-1][6])  # close_time ms
+
+            if last_close_time is not None:
+                if state.get("_last_bar_time") != last_close_time:
+                    state["_last_bar_time"] = last_close_time
+                    state["bars"] += 1
+
 
 
             # STEP 1: capital ctx (dynamic)
