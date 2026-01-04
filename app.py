@@ -34,7 +34,7 @@ CFG = {
     # =====================================================
     "05_ENGINE_ENABLE": True,
     "06_ENTRY_CANDIDATE_ENABLE": True,
-    "07_ENTRY_EXEC_ENABLE": True,  # 🔒 실주문 차단 (STEP A 핵심)
+    "07_ENTRY_EXEC_ENABLE": True,  # 🔒 실주문 허용 (STEP A 핵심)
 
     # =====================================================
     # [ STEP 3 ] 후보 생성
@@ -134,6 +134,10 @@ def init_state():
     return {
         "ticks": 0,
         "bars": 0,
+
+
+        # ✅ LIVE BAR TRACKING (STATE CONTRACT: explicit key)
+        "_last_bar_time": None,
 
         # candidate
         "has_candidate": False,
@@ -805,25 +809,34 @@ def step_13_execution_record_only(cfg, market, state, logger=print):
     # --- 기본 가드 ---
     if not state.get("entry_ready", False):
         return False
-
     if market is None:
         return False
-
     if state.get("entry_bar") is None:
         return False
 
     current_bar = int(state.get("bars", 0))
     entry_bar = int(state["entry_bar"])
 
-    # 🔒 시간축 잠금: entry_bar + 1 에서만 OPEN 허용
-    if current_bar != entry_bar + 1:
-        # 허가 만료 → 즉시 폐기
+    # --------------------------------------------------------
+    # LIVE CONTRACT TIME AXIS
+    # 1) 같은 bar(entry_bar)에서는 "대기" (아무 것도 하지 않음)
+    # 2) 정확히 다음 bar(entry_bar + 1)에서만 OPEN
+    # 3) 그 이후(bar > entry_bar + 1)는 만료(ENTRY_EXPIRED)
+    # --------------------------------------------------------
+
+    # 1) 같은 bar: 대기
+    if current_bar == entry_bar:
+        return False
+
+    # 3) 너무 늦음: 만료
+    if current_bar > entry_bar + 1:
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "ENTRY_EXPIRED_TIME_AXIS"
         return False
 
-    # --- OPEN ---
+    # 2) 정확히 다음 bar: OPEN
+    # 여기까지 왔다는 건 current_bar == entry_bar + 1
     if state.get("position") is None:
         state["position"] = "OPEN"
         state["position_open_bar"] = current_bar
@@ -860,6 +873,7 @@ def step_13_execution_record_only(cfg, market, state, logger=print):
         return True
 
     return False
+
 
 
 
