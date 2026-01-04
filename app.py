@@ -1238,7 +1238,16 @@ def app_run_live(logger=print):
                 "ema9": market.get("ema9"),
             }
 
-            state["bars"] += 1
+
+            # ====================================================
+            # BAR ADVANCE — 5m KLINE CLOSE ONLY
+            # ====================================================
+            cur_bar_time = market_core.get("time")
+
+            if state.get("_last_bar_time") != cur_bar_time:
+                state["_last_bar_time"] = cur_bar_time
+                state["bars"] += 1
+
 
             # STEP 1: capital ctx (dynamic)
             available = fetch_usdt_available(client) if not CFG.get("03_CAPITAL_USE_FIXED", True) else None
