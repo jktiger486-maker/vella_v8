@@ -9,11 +9,14 @@
 # - 후보(candidate)는 이벤트 기록이며, gate/entry/exit과 분리된다.
 # ============================================================
 
+
 import os
 import time
+import threading
 from decimal import Decimal, ROUND_DOWN
 
 import pandas as pd
+
 
 
 # ============================================================
@@ -24,7 +27,7 @@ CFG = {
     # =====================================================
     # [ STEP 1 ] 거래 대상 · 자본 · 손실 한계
     # =====================================================
-    "01_TRADE_SYMBOL": "WOOUSDT",
+    "01_TRADE_SYMBOL": "POLYXUSDT",
     "02_CAPITAL_BASE_USDT": 60,
     "03_CAPITAL_USE_FIXED": True,
     "04_CAPITAL_MAX_LOSS_PCT": 100.0,  # 100%면 사실상 차단 없음
@@ -50,7 +53,7 @@ CFG = {
     # [ STEP 5 ] EMA SLOPE
     # =====================================================
     "10_EMA_SLOPE_MIN_PCT": 0.0,
-    "11_EMA_SLOPE_LOOKBACK_BARS": 1,
+    "11_EMA_SLOPE_LOOKBACK_BARS": 0,
 
     # =====================================================
     # [ STEP 6 ] PRICE CONFIRM (ENTRY FINAL)
@@ -358,7 +361,7 @@ def step_3_generate_candidates(cfg, market, state, logger=print):
     if low is None or ema9 is None:
         return
 
-    # ✅ 한 봉 중복 생성 금지 (bar 기준)
+    # ✅ 한 봉(bar) 중복 생성 금지 — bar는 WS close 기준
     if state.get("last_candidate_bar") == state.get("bars"):
         return
 
@@ -806,73 +809,83 @@ def step_12_fail_safe(cfg, state, logger=print):
 
 def step_13_execution_record_only(cfg, market, state, logger=print):
 
-    # --- 기본 가드 ---
+    # --------------------------------------------------------
+    # BASIC GUARD
+    # --------------------------------------------------------
     if not state.get("entry_ready", False):
         return False
     if market is None:
         return False
     if state.get("entry_bar") is None:
         return False
+    if state.get("position") is not None:
+        return False
 
     current_bar = int(state.get("bars", 0))
     entry_bar = int(state["entry_bar"])
 
     # --------------------------------------------------------
-    # LIVE CONTRACT TIME AXIS
-    # 1) 같은 bar(entry_bar)에서는 "대기" (아무 것도 하지 않음)
-    # 2) 정확히 다음 bar(entry_bar + 1)에서만 OPEN
-    # 3) 그 이후(bar > entry_bar + 1)는 만료(ENTRY_EXPIRED)
+    # LIVE CONTRACT — TIME AXIS (STRICT)
+    #
+    # 1) current_bar == entry_bar       → 대기 (아무 것도 안 함)
+    # 2) current_bar == entry_bar + 1   → OPEN 허용 (유일)
+    # 3) current_bar >  entry_bar + 1   → ENTRY 만료
     # --------------------------------------------------------
 
-    # 1) 같은 bar: 대기
+    # 1) 같은 bar → 대기
     if current_bar == entry_bar:
         return False
 
-    # 3) 너무 늦음: 만료
+    # 3) 시간 초과 → 만료
     if current_bar > entry_bar + 1:
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "ENTRY_EXPIRED_TIME_AXIS"
         return False
 
-    # 2) 정확히 다음 bar: OPEN
-    # 여기까지 왔다는 건 current_bar == entry_bar + 1
-    if state.get("position") is None:
-        state["position"] = "OPEN"
-        state["position_open_bar"] = current_bar
-        state["entry_price"] = market.get("close")
+    # 2) 정확히 다음 bar → OPEN
+    # (여기 도달 조건 = current_bar == entry_bar + 1)
+    state["position"] = "OPEN"
+    state["position_open_bar"] = current_bar
+    state["entry_price"] = market.get("close")
 
-        # counters / time-axis
-        state["entries_in_cycle"] = int(state.get("entries_in_cycle", 0)) + 1
-        state["entries_today"] = int(state.get("entries_today", 0)) + 1
-        state["last_entry_bar"] = current_bar
-        state["last_entry_reason"] = state.get("entry_reason")
-        state["last_entry_price"] = market.get("close")
+    # --------------------------------------------------------
+    # COUNTERS / TIME AXIS UPDATE
+    # --------------------------------------------------------
+    state["entries_in_cycle"] = int(state.get("entries_in_cycle", 0)) + 1
+    state["entries_today"] = int(state.get("entries_today", 0)) + 1
+    state["last_entry_bar"] = current_bar
+    state["last_entry_reason"] = state.get("entry_reason")
+    state["last_entry_price"] = market.get("close")
 
-        # 🔒 entry 상태 소거 (중요)
-        state["entry_ready"] = False
-        state["entry_bar"] = None
+    # --------------------------------------------------------
+    # ENTRY STATE CLEANUP (CRITICAL)
+    # --------------------------------------------------------
+    state["entry_ready"] = False
+    state["entry_bar"] = None
+    state["entry_reason"] = None
 
-        # --- 기록은 OPEN 성공 시에만 ---
-        record = {
-            "bar": current_bar,
-            "time": market.get("time"),
-            "price": market.get("close"),
-            "capital_usdt": state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]),
-            "reason": state.get("last_entry_reason", "RECORD_ONLY"),
-            "type": "EXECUTION_RECORD_ONLY",
-        }
-        state["execution_records"].append(record)
+    # --------------------------------------------------------
+    # RECORD (OPEN 성공 시에만)
+    # --------------------------------------------------------
+    record = {
+        "bar": current_bar,
+        "time": market.get("time"),
+        "price": market.get("close"),
+        "capital_usdt": state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]),
+        "reason": state.get("last_entry_reason", "RECORD_ONLY"),
+        "type": "EXECUTION_RECORD_ONLY",
+    }
+    state["execution_records"].append(record)
 
-        if cfg.get("32_LOG_EXECUTIONS", True):
-            logger(
-                f"STEP13_EXEC_RECORD: bar={record['bar']} "
-                f"price={record['price']} capital={record['capital_usdt']}"
-            )
+    if cfg.get("32_LOG_EXECUTIONS", True):
+        logger(
+            f"STEP13_EXEC_RECORD: bar={record['bar']} "
+            f"price={record['price']} capital={record['capital_usdt']}"
+        )
 
-        return True
+    return True
 
-    return False
 
 
 
@@ -1121,59 +1134,123 @@ def step_16_real_order(cfg, state, market, client, logger=print):
 
 # ============================================================
 # LIVE DATA CONNECTION (BINANCE FUTURES)
+# ✔️ SINGLE SOURCE: BINANCE WEBSOCKET KLINE (5m CLOSE)
+# ✔️ V3 SUCCESS PATH
+# ✔️ BAR = kline close (is_final=True)
 # ============================================================
 
+import os
+import time
+from binance import ThreadedWebsocketManager
+
+EMA9_PERIOD = 9
+KLINE_INTERVAL = "5m"
+BTC_SYMBOL = "BTCUSDT"
+
+# ------------------------------------------------------------
+# WS MARKET CACHE (STATE CONTRACT)
+# ------------------------------------------------------------
+# 계약:
+# - 이 캐시는 "데이터 입력 버퍼"다
+# - 엔진 state / bar / gate / entry / position ❌
+# - 판단 로직은 STEP 내부에서만 수행
+# ------------------------------------------------------------
+_ws_market_cache = {
+    "kline": None,          # last closed 5m kline (dict)
+    "ema9": None,           # last ema9 value
+    "ema9_series": [],      # ema9 history (for slope gate)
+    "closes": [],           # ✅ V3 경로: close price buffer (for volatility only)
+}
+
+
+# ------------------------------------------------------------
+# BINANCE CLIENT (REST)
+# - 용도: BTC daily open / orderbook / balance / order
+# - LIVE PRICE / BAR 판단에는 사용 ❌
+# ------------------------------------------------------------
 try:
     from binance.client import Client
 except Exception:
     Client = None
 
-LIVE_INTERVAL_SEC = 3
-KLINE_INTERVAL = "5m"
-EMA9_PERIOD = 9
-BTC_SYMBOL = "BTCUSDT"
-
 def init_binance_client():
     if Client is None:
-        raise RuntimeError("python-binance not installed (binance.client.Client missing)")
+        raise RuntimeError("python-binance not installed (Client missing)")
     api_key = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_API_SECRET")
     if not api_key or not api_secret:
         raise RuntimeError("BINANCE_API_KEY / BINANCE_API_SECRET NOT SET")
     return Client(api_key, api_secret)
 
-def fetch_live_market_minimal(client, symbol, logger=print):
-    try:
-        kl = client.futures_klines(symbol=symbol, interval=KLINE_INTERVAL, limit=50)
-        if not kl:
-            return None
-        closes = [_safe_float(k[4]) for k in kl if _safe_float(k[4]) is not None]
-        if len(closes) < EMA9_PERIOD:
-            return None
+# ------------------------------------------------------------
+# WS KLINE START (5m, CLOSE ONLY)
+# ------------------------------------------------------------
+def start_ws_kline(symbol, logger=print):
+    twm = ThreadedWebsocketManager(
+        api_key=os.getenv("BINANCE_API_KEY"),
+        api_secret=os.getenv("BINANCE_API_SECRET"),
+    )
+    twm.start()
 
-        # EMA
-        k = 2 / (EMA9_PERIOD + 1)
-        ema = closes[0]
-        series = [ema]
-        for v in closes[1:]:
-            ema = v * k + ema * (1 - k)
-            series.append(ema)
+    def handle_kline(msg):
+        if msg.get("e") != "kline":
+            return
 
-        last = kl[-1]
-        return {
-            "time": int(last[6]),          # close time ms
-            "open": _safe_float(last[1]),
-            "high": _safe_float(last[2]),
-            "low": _safe_float(last[3]),
-            "close": _safe_float(last[4]),
-            "ema9": _safe_float(series[-1]),
-            "ema9_series": series[-max(int(CFG.get("11_EMA_SLOPE_LOOKBACK_BARS", 1)) + 1, 3):],
-            "kline_rows": kl,
+        k = msg.get("k", {})
+        if not k.get("x"):   # ❗ 봉 미종료 무시
+            return
+
+        close = _safe_float(k.get("c"))
+        high  = _safe_float(k.get("h"))
+        low   = _safe_float(k.get("l"))
+        open_ = _safe_float(k.get("o"))
+        t     = int(k.get("T"))  # close time ms
+
+        if close is None:
+            return
+
+        # EMA9 계산 (WS 기준)
+        series = _ws_market_cache["ema9_series"]
+        if not series:
+            ema = close
+        else:
+            kf = 2 / (EMA9_PERIOD + 1)
+            ema = close * kf + series[-1] * (1 - kf)
+
+        series.append(ema)
+        if len(series) > 50:
+            series[:] = series[-50:]
+
+        # ----------------------------------------
+        # V3 SUCCESS PATH
+        # CLOSE PRICE BUFFER (VOLATILITY ONLY)
+        # ----------------------------------------
+        closes = _ws_market_cache["closes"]
+        closes.append(close)
+        if len(closes) > 50:
+            closes[:] = closes[-50:]
+
+        _ws_market_cache["kline"] = {
+            "time": t,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "ema9": ema,
         }
-    except Exception as e:
-        logger(f"LIVE_MARKET_FETCH_FAIL: {e}")
-        return None
+        _ws_market_cache["ema9"] = ema
+        _ws_market_cache["ema9_series"] = series[:]
 
+        logger(
+            f"WS_KLINE_CLOSE: t={t} close={close} ema9={q(ema,6)}"
+        )
+
+
+    return twm
+
+# ------------------------------------------------------------
+# BTC DAILY OPEN (REST / FILTER ONLY)
+# ------------------------------------------------------------
 def fetch_btc_daily_open(client):
     try:
         kl = client.futures_klines(symbol=BTC_SYMBOL, interval="1d", limit=2)
@@ -1185,6 +1262,9 @@ def fetch_btc_daily_open(client):
     except Exception:
         return None
 
+# ------------------------------------------------------------
+# ORDERBOOK SPREAD (SAFETY ONLY)
+# ------------------------------------------------------------
 def fetch_orderbook_spread_pct(client, symbol):
     try:
         ob = client.futures_order_book(symbol=symbol, limit=5)
@@ -1198,8 +1278,10 @@ def fetch_orderbook_spread_pct(client, symbol):
     except Exception:
         return None, None, None
 
+# ------------------------------------------------------------
+# USDT AVAILABLE (CAPITAL CONTEXT)
+# ------------------------------------------------------------
 def fetch_usdt_available(client):
-    # dynamic capital source (03_CAPITAL_USE_FIXED=False)
     try:
         bals = client.futures_account_balance()
         for b in bals:
@@ -1210,37 +1292,36 @@ def fetch_usdt_available(client):
     return None
 
 
-# ============================================================
-# ENGINE RUNNER (LIVE / SINGLE PATH)
-# STEP 호출 순서:
-# 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 15 -> 16
-# ============================================================
 
 def app_run_live(logger=print):
     client = init_binance_client()
     state = init_state()
 
+    # WS INIT (BINANCE KLINE 5m CLOSE ONLY)
+    twm = start_ws_kline(CFG["01_TRADE_SYMBOL"], logger=logger)
+
     if not step_2_engine_switch(CFG, logger=logger):
         logger("ENGINE_STOP: STEP2")
         return state
 
-    logger("LIVE_START (DATA CONNECTED)")
+    logger("LIVE_START (WS CONNECTED)")
 
     btc_daily = fetch_btc_daily_open(client)
     btc_daily_open = btc_daily["open"] if btc_daily else None
 
     while True:
         try:
-            # refresh daily open periodically
+            # refresh BTC daily open
             if btc_daily_open is None or (state["ticks"] % 200 == 0):
                 btc_daily = fetch_btc_daily_open(client)
                 btc_daily_open = btc_daily["open"] if btc_daily else btc_daily_open
 
-            state["ticks"] += 1
-
-            market = fetch_live_market_minimal(client, CFG["01_TRADE_SYMBOL"], logger=logger)
+            # ====================================================
+            # LIVE MARKET — WS KLINE CACHE (5m CLOSE ONLY)
+            # ====================================================
+            market = _ws_market_cache.get("kline")
             if market is None:
-                time.sleep(LIVE_INTERVAL_SEC)
+                time.sleep(0.1)
                 continue
 
             market_core = {
@@ -1252,47 +1333,42 @@ def app_run_live(logger=print):
                 "ema9": market.get("ema9"),
             }
 
-
             # ====================================================
-            # BAR ADVANCE — 5m KLINE CLOSE ONLY (LIVE SAFE)
+            # BAR ADVANCE — WS KLINE CLOSE ONLY (단 1회)
             # ====================================================
-            kline_rows = market.get("kline_rows") or []
-            last_close_time = None
+            bar_time = market_core.get("time")
+            if bar_time is not None and state.get("_last_bar_time") != bar_time:
+                state["_last_bar_time"] = bar_time
+                state["bars"] += 1
 
-            if kline_rows:
-                last_close_time = int(kline_rows[-1][6])  # close_time ms
-
-            if last_close_time is not None:
-                if state.get("_last_bar_time") != last_close_time:
-                    state["_last_bar_time"] = last_close_time
-                    state["bars"] += 1
-
-
-
-            # STEP 1: capital ctx (dynamic)
+            # STEP 1: capital
             available = fetch_usdt_available(client) if not CFG.get("03_CAPITAL_USE_FIXED", True) else None
-            capital_ctx = {"available_usdt": available}
-            step_1_engine_limit(CFG, state, capital_ctx=capital_ctx, logger=logger)
+            step_1_engine_limit(
+                CFG,
+                state,
+                capital_ctx={"available_usdt": available},
+                logger=logger
+            )
 
             # STEP 3: candidate
             step_3_generate_candidates(CFG, market_core, state, logger=logger)
 
-            # STEP 4: BTC ctx
-            btc_price = None
-            try:
-                t = client.futures_symbol_ticker(symbol=BTC_SYMBOL)
-                btc_price = _safe_float(t.get("price"))
-            except Exception:
-                btc_price = None
-            btc_ctx = {"daily_open": _safe_float(btc_daily_open), "price": btc_price}
+            # STEP 4: BTC ctx (FILTER ONLY)
+            btc_ctx = {
+                "daily_open": _safe_float(btc_daily_open),
+                "price": None,  # bias OFF
+            }
 
             # STEP 5: EMA ctx
-            ema_ctx = {"ema9_series": market.get("ema9_series") or []}
+            ema_ctx = {
+                "ema9_series": _ws_market_cache.get("ema9_series") or []
+            }
 
-            # STEP 8: safety ctx (needs time)
+            # STEP 8: safety ctx
             now_ms = int(time.time() * 1000)
-            age_ms = max(0, now_ms - int(market_core["time"])) if market_core.get("time") is not None else None
-            is_stale = (age_ms is not None and age_ms > 2 * 60 * 1000)
+            age_ms = max(0, now_ms - int(market_core["time"]))
+            is_stale = age_ms > 2 * 60 * 1000
+
             spread_pct, bid, ask = fetch_orderbook_spread_pct(client, CFG["01_TRADE_SYMBOL"])
             safety_ctx = {
                 "market_time_ms": market_core.get("time"),
@@ -1303,67 +1379,52 @@ def app_run_live(logger=print):
                 "ask": ask,
             }
 
-            # STEP 10: vol ctx (only computed when enabled)
+            # STEP 10: vol ctx
             vol_ctx = {"volatility_pct": None}
             if CFG.get("29_VOLATILITY_BLOCK_ENABLE", False):
-                rows = market.get("kline_rows") or []
-                lookback = min(20, len(rows))
-                hi = max([_safe_float(r[2]) for r in rows[-lookback:] if _safe_float(r[2]) is not None], default=None)
-                lo = min([_safe_float(r[3]) for r in rows[-lookback:] if _safe_float(r[3]) is not None], default=None)
-                close = _safe_float(market_core.get("close"))
-                vol_pct = None
-                if hi is not None and lo is not None and close and close > 0:
-                    vol_pct = (hi - lo) / close * 100.0
-                vol_ctx = {"volatility_pct": vol_pct}
+                closes = _ws_market_cache.get("closes") or []
+                if len(closes) >= 2:
+                    hi = max(closes)
+                    lo = min(closes)
+                    close = market_core["close"]
+                    if close > 0:
+                        vol_ctx["volatility_pct"] = (hi - lo) / close * 100.0
 
-            # GATES (4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10)
-            if not step_4_btc_session_bias(CFG, btc_ctx, state, logger=logger):
-                time.sleep(LIVE_INTERVAL_SEC); continue
-            if not step_5_ema_slope_gate(CFG, ema_ctx, state, logger=logger):
-                time.sleep(LIVE_INTERVAL_SEC); continue
+            # GATES
+            if not step_4_btc_session_bias(CFG, btc_ctx, state, logger): continue
+            if not step_5_ema_slope_gate(CFG, ema_ctx, state, logger): continue
 
-            _ = step_6_entry_judge(CFG, market_core, state, logger=logger)
+            step_6_entry_judge(CFG, market_core, state, logger)
 
-            if not step_7_execution_tempo_control(CFG, state, logger=logger):
-                time.sleep(LIVE_INTERVAL_SEC); continue
-            if not step_8_execution_safety_guard(CFG, safety_ctx, state, logger=logger):
-                time.sleep(LIVE_INTERVAL_SEC); continue
-            if not step_9_reentry_candidate_hygiene(CFG, market_core, state, logger=logger):
-                time.sleep(LIVE_INTERVAL_SEC); continue
-            if not step_10_volatility_protection(CFG, vol_ctx, state, logger=logger):
-                time.sleep(LIVE_INTERVAL_SEC); continue
+            if not step_7_execution_tempo_control(CFG, state, logger): continue
+            if not step_8_execution_safety_guard(CFG, safety_ctx, state, logger): continue
+            if not step_9_reentry_candidate_hygiene(CFG, market_core, state, logger): continue
+            if not step_10_volatility_protection(CFG, vol_ctx, state, logger): continue
 
-            step_11_observability(CFG, state, logger=logger)
+            step_11_observability(CFG, state, logger)
 
-            if not step_12_fail_safe(CFG, state, logger=logger):
+            if not step_12_fail_safe(CFG, state, logger):
                 logger("ENGINE_STOP: STEP12_FAIL_SAFE")
                 break
 
-            # STEP 13: record-only entry open
-            step_13_execution_record_only(CFG, market_core, state, logger=logger)
+            step_13_execution_record_only(CFG, market_core, state, logger)
+            step_14_exit_core_calc(CFG, state, market_core, logger)
+            step_15_exit_judge(CFG, state, market_core, logger)
+            step_16_real_order(CFG, state, market_core, client, logger)
 
-            # STEP 14/15/16: exit pipeline
-            step_14_exit_core_calc(CFG, state, market_core, logger=logger)
-            step_15_exit_judge(CFG, state, market_core, logger=logger)
-            step_16_real_order(CFG, state, market_core, client, logger=logger)
-
-            if state["ticks"] % 25 == 0:
-                logger(
-                    f"LIVE_TICK: ticks={state['ticks']} bars={state['bars']} gate_ok={state.get('gate_ok')} "
-                    f"pos={state.get('position')} entries_today={state.get('entries_today')} "
-                    f"equity={q(state.get('equity', 0.0),4)} pnl={q(state.get('realized_pnl', 0.0),4)} "
-                    f"spread={safety_ctx.get('spread_pct')} stale={safety_ctx.get('is_stale')}"
-                )
-
-            time.sleep(LIVE_INTERVAL_SEC)
+            state["ticks"] += 1
+            time.sleep(0.1)
 
         except KeyboardInterrupt:
-            logger("LIVE_STOP"); break
+            logger("LIVE_STOP")
+            break
         except Exception as e:
             logger(f"LIVE_ERROR: {e}")
-            time.sleep(LIVE_INTERVAL_SEC)
+            time.sleep(0.5)
 
     return state
+
+
 
 
 # ============================================================
