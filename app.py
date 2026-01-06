@@ -470,99 +470,88 @@ def step_5_ema_slope_gate(cfg, ema_ctx, state, logger=print):
 
 # ============================================================
 # [ STEP 6 ] ENTRY JUDGEMENT (LIVE CONTRACT / NO ORDER)
-# - STEP3 후보 + gate 결과를 읽어 기록만 한다
-# - STEP6 PRICE CONFIRM(12/13) 집행 포함
+# - 브8 기준선 정합 버전 (브3 성공 특성 반영)
+# - 역할: gate 통과 + 후보 존재 + EMA 근접(완화) → entry_ready
+# - 비역할: 후보 관리/시간축/재진입/과잉 안전 (전부 제거)
 # ============================================================
 
 def step_6_entry_judge(cfg, market, state, logger=print):
 
-    # 🔒 EXIT 우선 시간축: EXIT 준비 중이면 ENTRY 판단 금지
+    # 🔒 EXIT 우선
     if state.get("exit_ready") or state.get("exit_confirm_count", 0) > 0:
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "EXIT_IN_PROGRESS"
         return False
 
-    for k in ["12_EXECUTION_MIN_PRICE_MOVE_PCT", "13_EXECUTION_ONLY_ON_NEW_LOW"]:
-        if k not in cfg:
-            raise RuntimeError(f"CFG_MISSING_KEY_STEP6: {k}")
-
-    has_candidate = bool(state.get("has_candidate") or (len(state.get("candidates", [])) > 0))
+    # ---- GATE ----
     gate_ok = bool(state.get("gate_ok", False))
-
-    # ---- 후보 최신성 (24_ENTRY_LOOKBACK_BARS) 집행 ----
-    lookback = int(cfg.get("24_ENTRY_LOOKBACK_BARS", 1) or 0)
-    latest_cand_bar = None
-    if state.get("candidates"):
-        latest_cand_bar = state["candidates"][-1].get("bar")
-    if lookback > 0 and latest_cand_bar is not None:
-        if (state.get("bars", 0) - int(latest_cand_bar)) > lookback:
-            has_candidate = False
-
-    # ---- PRICE CONFIRM(12/13) ----
-    price_ok = True
-    reason_price = None
-
-    if market is not None:
-        close = _safe_float(market.get("close"))
-        low = _safe_float(market.get("low"))
-    else:
-        close = None
-        low = None
-
-    # 12_MIN_PRICE_MOVE: 후보 trigger 대비 최소 하락폭(%) 요구 (SHORT)
-    min_move = float(cfg.get("12_EXECUTION_MIN_PRICE_MOVE_PCT", 0.0) or 0.0)
-    if min_move > 0 and has_candidate and close is not None:
-        trig = None
-        try:
-            trig = _safe_float(state["candidates"][-1].get("trigger_price"))
-        except Exception:
-            trig = None
-        if trig and trig > 0:
-            move_pct = (trig - close) / trig * 100.0
-            if move_pct < min_move:
-                price_ok = False
-                reason_price = f"PRICE_MOVE_TOO_SMALL move_pct={q(move_pct,4)} < min={q(min_move,4)}"
-        else:
-            price_ok = False
-            reason_price = "TRIGGER_PRICE_MISSING"
-
-    # 13_ONLY_ON_NEW_LOW: 직전 entry 이후의 "새 저가"에서만 허용
-    if price_ok and bool(cfg.get("13_EXECUTION_ONLY_ON_NEW_LOW", False)):
-        if low is None:
-            price_ok = False
-            reason_price = "LOW_MISSING_FOR_NEW_LOW"
-        else:
-            last_entry_price = _safe_float(state.get("last_entry_price"))
-            if last_entry_price is not None:
-                # "새 저가" = low < last_entry_price (SHORT 관점)
-                if not (low < last_entry_price):
-                    price_ok = False
-                    reason_price = "NOT_NEW_LOW"
-
-    entry_ok = bool(gate_ok and has_candidate and price_ok and state.get("position") is None)
-
-    state["entry_ready"] = entry_ok
-    if entry_ok:
-        state["entry_reason"] = "GATE_OK_AND_CANDIDATE_PRESENT"
-    else:
-        # 가장 먼저 막힌 이유를 기록(짧게)
-        if not gate_ok:
-            state["entry_reason"] = state.get("gate_reason") or "GATE_BLOCK"
-        elif not has_candidate:
-            state["entry_reason"] = "NO_VALID_CANDIDATE"
-        elif not price_ok:
-            state["entry_reason"] = reason_price or "PRICE_CONFIRM_BLOCK"
-        else:
-            state["entry_reason"] = "ENTRY_NOT_READY"
-
-    # entry_ready는 '현재 bar 한정 허가'
-    if entry_ok:
-        state["entry_bar"] = state.get("bars")
-    else:
+    if not gate_ok:
+        state["entry_ready"] = False
         state["entry_bar"] = None
+        state["entry_reason"] = state.get("gate_reason") or "GATE_BLOCK"
+        return False
 
-    return entry_ok
+    # ---- CANDIDATE (존재만 확인, 관리/TTL/윈도우 ❌) ----
+    candidates = state.get("candidates", []) or []
+    has_candidate = bool(state.get("has_candidate") or len(candidates) > 0)
+    if not has_candidate:
+        state["entry_ready"] = False
+        state["entry_bar"] = None
+        state["entry_reason"] = "NO_CANDIDATE"
+        return False
+
+    # ---- MARKET (단일 기준: close) ----
+    if market is None:
+        state["entry_ready"] = False
+        state["entry_bar"] = None
+        state["entry_reason"] = "MARKET_MISSING"
+        return False
+
+    close = _safe_float(market.get("close"))
+    ema9  = _safe_float(market.get("ema9"))
+    if close is None or ema9 is None:
+        state["entry_ready"] = False
+        state["entry_bar"] = None
+        state["entry_reason"] = "PRICE_OR_EMA_MISSING"
+        return False
+
+    # ========================================================
+    # EMA 근접 허용 (브3 핵심)
+    # - 단일 규칙
+    # - 판단용 소수점 6자리 정규화
+    # ========================================================
+    tol_pct = float(cfg.get("EMA_TOL_PCT", 0.20) or 0.0)   # % 단위
+    eps_pct = float(cfg.get("EMA_EPS_PCT", 0.0002) or 0.0) # 비율 완충
+
+    tol = ema9 * (tol_pct / 100.0)
+    eps = ema9 * eps_pct
+    band = tol + eps
+
+    close_n = q(close, 6)
+    ema9_n  = q(ema9, 6)
+    band_n  = q(band, 6)
+
+    if abs(close_n - ema9_n) > band_n:
+        state["entry_ready"] = False
+        state["entry_bar"] = None
+        state["entry_reason"] = "EMA_DISTANCE_EXCEEDED"
+        return False
+
+    # ========================================================
+    # ENTRY 허가 (STEP 6의 유일한 출력)
+    # ========================================================
+    if state.get("position") is None:
+        state["entry_ready"] = True
+        state["entry_bar"] = state.get("bars")
+        state["entry_reason"] = "STEP6_PASS"
+        return True
+
+    state["entry_ready"] = False
+    state["entry_bar"] = None
+    state["entry_reason"] = "POSITION_EXISTS"
+    return False
+
 
 
 # ============================================================
