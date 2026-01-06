@@ -341,10 +341,10 @@ def step_2_engine_switch(cfg, logger=print):
 
 
 # ============================================================
-# [ STEP 3 ] CANDIDATE GENERATOR (SINGLE SOURCE)
+# [ STEP 3 ] CANDIDATE GENERATOR (SINGLE SOURCE) — LIVE FIX
 # 계약:
 # - [04~18] 체크리스트 준수
-# - 한 봉에서 중복 생성 금지
+# - 한 봉에서 중복 생성 금지 (WS CLOSE 기준)
 # - BTC/gate/position 무관 (오직 이벤트 기록)
 # - 수량/SLTPTRAIL/entry_ready 설정 금지
 # - 후보 TTL/POOL 관리는 STEP 9에서만
@@ -365,26 +365,36 @@ def step_3_generate_candidates(cfg, market, state, logger=print):
 
     low = _safe_float(market.get("low"))
     ema9 = _safe_float(market.get("ema9"))
-    t = market.get("time")
+    t = market.get("time")   # WS kline close time (ms)
 
-    if low is None or ema9 is None:
+    if low is None or ema9 is None or t is None:
         return
 
-    # ✅ 한 봉(bar) 중복 생성 금지 — bar는 WS close 기준
-    if state.get("last_candidate_bar") == state.get("bars"):
+    # --------------------------------------------------------
+    # ✅ LIVE 기준 중복 방지
+    # - bar index ❌ (bars는 이미 증가된 상태)
+    # - bar time(ms) 기준 ✔️
+    # --------------------------------------------------------
+    if state.get("last_candidate_time") == t:
         return
 
+    # --------------------------------------------------------
     # ✅ MIN GAP (bars) 집행: 28_CAND_MIN_GAP_BARS
+    # --------------------------------------------------------
     gap = int(cfg.get("28_CAND_MIN_GAP_BARS", 0) or 0)
     last_bar = state.get("last_candidate_bar")
     if last_bar is not None and gap > 0:
         if (state.get("bars", 0) - int(last_bar)) < gap:
             return
 
+    # --------------------------------------------------------
     # ✅ 침범(low < ema9) 즉시 후보 생성
+    # --------------------------------------------------------
     if low < ema9:
         state["has_candidate"] = True
         state["last_candidate_bar"] = state.get("bars")
+        state["last_candidate_time"] = t
+
         cand = {
             "bar": state.get("bars"),
             "time": t,
@@ -393,8 +403,13 @@ def step_3_generate_candidates(cfg, market, state, logger=print):
             "reason": "EMA9_PENETRATION",
         }
         state["candidates"].append(cand)
+
         if cfg.get("31_LOG_CANDIDATES", True):
-            logger(f"STEP3_NEW_CANDIDATE: bar={state['bars']} t={t} low={low} ema9={ema9}")
+            logger(
+                f"STEP3_NEW_CANDIDATE: "
+                f"bar={state.get('bars')} "
+                f"t={t} low={low} ema9={ema9}"
+            )
 
 
 # ============================================================
