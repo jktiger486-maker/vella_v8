@@ -4,7 +4,7 @@
 # ENGINE INDEPENDENT / LIVE CONTRACT
 # ------------------------------------------------------------
 # 설계-구현 100% 일치 원칙:
-# - CFG(01~37)에 있는 항목은 모두 "집행 로직"이 존재해야 한다.
+# - CFG(01~40)에 있는 항목은 모두 "집행 로직"이 존재해야 한다.
 # - OFF 옵션도 '집행 경로가 존재'해야 한다 (단, OFF면 통과).
 # - 후보(candidate)는 이벤트 기록이며, gate/entry/exit과 분리된다.
 # ============================================================
@@ -20,7 +20,7 @@ import pandas as pd
 
 
 # ============================================================
-# CFG (01 ~ 37 FULL)
+# CFG (01 ~ 40 FULL) — VELLA V8 BASELINE (FREEZE)
 # ============================================================
 
 CFG = {
@@ -30,14 +30,14 @@ CFG = {
     "01_TRADE_SYMBOL": "POLYXUSDT",
     "02_CAPITAL_BASE_USDT": 60,
     "03_CAPITAL_USE_FIXED": True,
-    "04_CAPITAL_MAX_LOSS_PCT": 100.0,  # 100%면 사실상 차단 없음
+    "04_CAPITAL_MAX_LOSS_PCT": 100.0,
 
     # =====================================================
     # [ STEP 2 ] 엔진 / 실행 스위치
     # =====================================================
-    "05_ENGINE_ENABLE": True,
+    "05_ENGINE_ENABLE": True,          # 🔒 엔진 보호: False면 엔진 즉시 정지
     "06_ENTRY_CANDIDATE_ENABLE": True,
-    "07_ENTRY_EXEC_ENABLE": True,  # 🔒 실주문 허용 (STEP A 핵심)
+    "07_ENTRY_EXEC_ENABLE": True,      # 🔒 엔진 보호: 실주문 ON/OFF 단일 스위치
 
     # =====================================================
     # [ STEP 3 ] 후보 생성
@@ -47,7 +47,7 @@ CFG = {
     # =====================================================
     # [ STEP 4 ] BTC SESSION BIAS
     # =====================================================
-    "09_BTC_SESSION_BIAS_ENABLE": False,  # 유지 (STEP A에서는 OFF)
+    "09_BTC_SESSION_BIAS_ENABLE": False,
 
     # =====================================================
     # [ STEP 5 ] EMA SLOPE
@@ -56,28 +56,35 @@ CFG = {
     "11_EMA_SLOPE_LOOKBACK_BARS": 0,
 
     # =====================================================
-    # [ STEP 6 ] PRICE CONFIRM (ENTRY FINAL)
+    # [ STEP 6 ] PRICE CONFIRM
     # =====================================================
     "12_EXECUTION_MIN_PRICE_MOVE_PCT": 0.0,
     "13_EXECUTION_ONLY_ON_NEW_LOW": False,
 
     # =====================================================
-    # [ STEP 7 ] 실행 속도 제어 (COOLDOWN)
+    # [ STEP 6-A ] EMA PROXIMITY
+    # =====================================================
+    "38_EMA_TOL_PCT": 0.20,
+    "39_EMA_EPS_PCT": 0.0,
+
+    # =====================================================
+    # [ STEP 7 ] 실행 속도 제어
     # =====================================================
     "14_STATE_COOLDOWN_ENABLE": False,
     "15_COOLDOWN_RANGE_BARS": 0,
     "16_COOLDOWN_TREND_BARS": 0,
 
     # =====================================================
-    # [ STEP 8 ] 실행 안전장치 (LIMITS / STALE / SPREAD)
+    # [ STEP 8 ] 실행 안전장치
     # =====================================================
     "17_ENTRY_MAX_PER_CYCLE": 2,
     "18_MAX_ENTRIES_PER_DAY": 20,
-    "19_DATA_STALE_BLOCK": False,                 # ✅ ON
-    "20_EXECUTION_SPREAD_GUARD_ENABLE": False,    # ✅ ON
+    "19_DATA_STALE_BLOCK": False,
+    "20_EXECUTION_SPREAD_GUARD_ENABLE": False,
+    "40_EXECUTION_SPREAD_MAX_PCT": 0.50,
 
     # =====================================================
-    # [ STEP 9 ] 재진입 관리 · 후보 정리
+    # [ STEP 9 ] 재진입 관리
     # =====================================================
     "21_ENTRY_COOLDOWN_BARS": 0,
     "22_ENTRY_COOLDOWN_AFTER_EXIT": 0,
@@ -98,21 +105,23 @@ CFG = {
     # [ STEP 11 ] 로그
     # =====================================================
     "31_LOG_CANDIDATES": True,
-    "32_LOG_EXECUTIONS": True,  # 기록만 (실주문 OFF)
+    "32_LOG_EXECUTIONS": True,
 
     # =====================================================
-    # [ STEP 12 ] FAIL-SAFE
+    # [ STEP 12 ] FAIL-SAFE (엔진 보호 핵심)
     # =====================================================
-    "33_ENGINE_FAIL_FAST_ENABLE": True,
-    "34_ENGINE_FAIL_NOTIFY_ONLY": True,
+    "33_ENGINE_FAIL_FAST_ENABLE": True,   # 🔒 엔진 보호: 손실 초과 시 엔진 중단
+    "34_ENGINE_FAIL_NOTIFY_ONLY": True,   # 🔒 엔진 보호: 중단 대신 알림만
 
     # =====================================================
-    # [ STEP 14 ] EXIT CORE PARAMS (중요 3개)
+    # [ STEP 14 ] EXIT CORE PARAMS
     # =====================================================
     "35_SL_PCT": 0.60,
     "36_TP_PCT": 0.80,
     "37_TRAILING_PCT": 0.40,
 }
+
+
 
 # ============================================================
 # CFG FREEZE DECLARATION
@@ -426,7 +435,12 @@ def step_4_btc_session_bias(cfg, btc_ctx, state, logger=print):
 
 
 # ============================================================
-# [ STEP 5 ] EMA SLOPE GATE (ENTRY GATE ONLY)
+# [ STEP 5 ] EMA SLOPE GATE (GATE PRODUCER / TRUE PULSE)
+# ------------------------------------------------------------
+# 계약:
+# - gate_ok는 반드시 여기서 매 bar 생산된다 (TRUE PULSE)
+# - CFG ON/OFF와 무관하게 gate_ok는 항상 True/False로 덮어쓴다
+# - 다른 STEP은 gate_ok=False만 찍을 수 있음
 # ============================================================
 
 def step_5_ema_slope_gate(cfg, ema_ctx, state, logger=print):
@@ -434,13 +448,26 @@ def step_5_ema_slope_gate(cfg, ema_ctx, state, logger=print):
         if k not in cfg:
             raise RuntimeError(f"CFG_MISSING_KEY_STEP5: {k}")
 
+    min_pct = float(cfg["10_EMA_SLOPE_MIN_PCT"])
+    lb = int(cfg["11_EMA_SLOPE_LOOKBACK_BARS"] or 0)
+
+    # ========================================================
+    # EMA SLOPE GATE OFF (CFG 기준) → gate_ok = True 생산
+    # --------------------------------------------------------
+    # TRUE/FALSE 맘대로 바꿔도 에러 없음
+    # ========================================================
+    if min_pct == 0 and lb == 0:
+        state["gate_ok"] = True
+        state["gate_reason"] = "EMA_SLOPE_GATE_OFF"
+        return True
+
+    # ========================================================
+    # EMA CONTEXT 검증 (ON 상태)
+    # ========================================================
     if ema_ctx is None or not ema_ctx.get("ema9_series"):
         state["gate_ok"] = False
         state["gate_reason"] = "EMA_CTX_MISSING"
         return False
-
-    min_pct = float(cfg["10_EMA_SLOPE_MIN_PCT"])
-    lb = int(cfg["11_EMA_SLOPE_LOOKBACK_BARS"] or 1)
 
     series = ema_ctx["ema9_series"]
     if len(series) <= lb:
@@ -457,7 +484,9 @@ def step_5_ema_slope_gate(cfg, ema_ctx, state, logger=print):
 
     slope_pct = (ema_now - ema_prev) / ema_prev * 100.0
 
-    # SHORT 기준: slope <= 0 (또는 -min_pct 이하)
+    # ========================================================
+    # SHORT 기준 slope 판정
+    # ========================================================
     if min_pct <= 0:
         ok = (slope_pct <= 0)
     else:
@@ -492,16 +521,15 @@ def step_6_entry_judge(cfg, market, state, logger=print):
         state["entry_reason"] = state.get("gate_reason") or "GATE_BLOCK"
         return False
 
-    # ---- CANDIDATE (존재만 확인, 관리/TTL/윈도우 ❌) ----
+    # ---- CANDIDATE (존재만 확인) ----
     candidates = state.get("candidates", []) or []
-    has_candidate = bool(state.get("has_candidate") or len(candidates) > 0)
-    if not has_candidate:
+    if not (state.get("has_candidate") or len(candidates) > 0):
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "NO_CANDIDATE"
         return False
 
-    # ---- MARKET (단일 기준: close) ----
+    # ---- MARKET ----
     if market is None:
         state["entry_ready"] = False
         state["entry_bar"] = None
@@ -517,26 +545,49 @@ def step_6_entry_judge(cfg, market, state, logger=print):
         return False
 
     # ========================================================
-    # EMA 근접 허용 (브3 핵심)
-    # - 단일 규칙
-    # - 판단용 소수점 6자리 정규화
+    # EMA 근접 허용 (CFG 38/39)
     # ========================================================
-    tol_pct = float(cfg.get("EMA_TOL_PCT", 0.20) or 0.0)   # % 단위
-    eps_pct = float(cfg.get("EMA_EPS_PCT", 0.0002) or 0.0) # 비율 완충
+    if "38_EMA_TOL_PCT" not in cfg or "39_EMA_EPS_PCT" not in cfg:
+        raise RuntimeError("CFG_MISSING_KEY_STEP6_EMA_PROXIMITY")
 
-    tol = ema9 * (tol_pct / 100.0)
-    eps = ema9 * eps_pct
+    tol = ema9 * (float(cfg["38_EMA_TOL_PCT"]) / 100.0)
+    eps = ema9 * float(cfg["39_EMA_EPS_PCT"])
     band = tol + eps
 
-    close_n = q(close, 6)
-    ema9_n  = q(ema9, 6)
-    band_n  = q(band, 6)
-
-    if abs(close_n - ema9_n) > band_n:
+    if abs(q(close,6) - q(ema9,6)) > q(band,6):
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "EMA_DISTANCE_EXCEEDED"
         return False
+
+    # ========================================================
+    # CFG 12 — MIN PRICE MOVE (OFF-SAFE, 존재만)
+    # ========================================================
+    min_move_pct = float(cfg.get("12_EXECUTION_MIN_PRICE_MOVE_PCT", 0.0))
+    if min_move_pct > 0:
+        last_cand = candidates[-1]
+        ref = _safe_float(last_cand.get("trigger_price"))
+        if ref and ref > 0:
+            move_pct = abs(close - ref) / ref * 100.0
+            if move_pct < min_move_pct:
+                state["entry_ready"] = False
+                state["entry_bar"] = None
+                state["entry_reason"] = "MIN_PRICE_MOVE_BLOCK"
+                return False
+    # min_move_pct == 0 → 완전 무시 (OFF SAFE)
+
+    # ========================================================
+    # CFG 13 — ONLY ON NEW LOW (OFF-SAFE, 존재만)
+    # ========================================================
+    if cfg.get("13_EXECUTION_ONLY_ON_NEW_LOW", False):
+        last_cand = candidates[-1]
+        trigger = _safe_float(last_cand.get("trigger_price"))
+        if trigger is not None and close > trigger:
+            state["entry_ready"] = False
+            state["entry_bar"] = None
+            state["entry_reason"] = "ONLY_ON_NEW_LOW_BLOCK"
+            return False
+    # False → 완전 무시 (OFF SAFE)
 
     # ========================================================
     # ENTRY 허가 (STEP 6의 유일한 출력)
@@ -551,6 +602,7 @@ def step_6_entry_judge(cfg, market, state, logger=print):
     state["entry_bar"] = None
     state["entry_reason"] = "POSITION_EXISTS"
     return False
+
 
 
 
@@ -592,34 +644,53 @@ def step_7_execution_tempo_control(cfg, state, logger=print):
 # - 17_ENTRY_MAX_PER_CYCLE 집행
 # - 18_MAX_ENTRIES_PER_DAY 집행 (UTC daykey)
 # - 19_DATA_STALE_BLOCK 집행
-# - 20_SPREAD_GUARD 집행
+# - 20_SPREAD_GUARD 집행 (CFG 정식)
 # ============================================================
 
 def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
-    for k in ["17_ENTRY_MAX_PER_CYCLE", "18_MAX_ENTRIES_PER_DAY", "19_DATA_STALE_BLOCK", "20_EXECUTION_SPREAD_GUARD_ENABLE"]:
+    required = [
+        "17_ENTRY_MAX_PER_CYCLE",
+        "18_MAX_ENTRIES_PER_DAY",
+        "19_DATA_STALE_BLOCK",
+        "20_EXECUTION_SPREAD_GUARD_ENABLE",
+        "40_EXECUTION_SPREAD_MAX_PCT",
+    ]
+    for k in required:
         if k not in cfg:
             raise RuntimeError(f"CFG_MISSING_KEY_STEP8: {k}")
 
-    # ---- entry limit per cycle ----
+    # --------------------------------------------------------
+    # entry limit per cycle
+    # --------------------------------------------------------
     max_cycle = int(cfg.get("17_ENTRY_MAX_PER_CYCLE", 1) or 0)
-    if max_cycle > 0 and int(state.get("entries_in_cycle", 0)) >= max_cycle and state.get("position") is None:
+    if (
+        max_cycle > 0
+        and int(state.get("entries_in_cycle", 0)) >= max_cycle
+        and state.get("position") is None
+    ):
         state["gate_ok"] = False
         state["gate_reason"] = f"MAX_ENTRY_PER_CYCLE_BLOCK limit={max_cycle}"
         return False
 
-    # ---- entry limit per day (UTC) ----
+    # --------------------------------------------------------
+    # entry limit per day (UTC)
+    # --------------------------------------------------------
     max_day = int(cfg.get("18_MAX_ENTRIES_PER_DAY", 0) or 0)
     if max_day > 0:
-        # day_key update from safety_ctx.market_time_ms if provided
         ms = None
         if safety_ctx and safety_ctx.get("market_time_ms") is not None:
             ms = safety_ctx.get("market_time_ms")
+
         dk = _ms_to_daykey_utc(ms) if ms is not None else None
         if dk is not None:
             if state.get("day_key") != dk:
                 state["day_key"] = dk
                 state["entries_today"] = 0
-        if int(state.get("entries_today", 0)) >= max_day and state.get("position") is None:
+
+        if (
+            int(state.get("entries_today", 0)) >= max_day
+            and state.get("position") is None
+        ):
             state["gate_ok"] = False
             state["gate_reason"] = f"MAX_ENTRIES_PER_DAY_BLOCK limit={max_day}"
             return False
@@ -627,27 +698,37 @@ def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
     if safety_ctx is None:
         return True
 
-    # ---- stale block ----
+    # --------------------------------------------------------
+    # stale data block
+    # --------------------------------------------------------
     if cfg["19_DATA_STALE_BLOCK"]:
         if safety_ctx.get("is_stale"):
             state["gate_ok"] = False
             state["gate_reason"] = f"DATA_STALE_BLOCK age_ms={safety_ctx.get('age_ms')}"
             return False
 
-    # ---- spread guard ----
+    # --------------------------------------------------------
+    # spread guard (CFG ONLY, HARD CODE ❌)
+    # --------------------------------------------------------
     if cfg["20_EXECUTION_SPREAD_GUARD_ENABLE"]:
         spread_pct = safety_ctx.get("spread_pct")
-        HARD_LIMIT = 0.50  # CFG에 임계값이 없어서 하드리밋
+        max_spread = float(cfg["40_EXECUTION_SPREAD_MAX_PCT"])
+
         if spread_pct is None:
             state["gate_ok"] = False
             state["gate_reason"] = "SPREAD_CTX_MISSING"
             return False
-        if float(spread_pct) > HARD_LIMIT:
+
+        if float(spread_pct) > max_spread:
             state["gate_ok"] = False
-            state["gate_reason"] = f"SPREAD_BLOCK spread_pct={q(spread_pct,4)}"
+            state["gate_reason"] = (
+                f"SPREAD_BLOCK spread_pct={q(spread_pct,4)} "
+                f"> max={q(max_spread,4)}"
+            )
             return False
 
     return True
+
 
 
 # ============================================================
