@@ -1186,7 +1186,7 @@ def start_ws_kline(symbol, logger=print):
             return
 
         k = msg.get("k", {})
-        if not k.get("x"):   # ❗ 봉 미종료 무시
+        if not k.get("x"):   # ❗ 봉 미종료 무시 (CLOSE ONLY)
             return
 
         close = _safe_float(k.get("c"))
@@ -1219,6 +1219,7 @@ def start_ws_kline(symbol, logger=print):
         if len(closes) > 50:
             closes[:] = closes[-50:]
 
+        # WS MARKET CACHE (SINGLE SOURCE)
         _ws_market_cache["kline"] = {
             "time": t,
             "open": open_,
@@ -1230,12 +1231,22 @@ def start_ws_kline(symbol, logger=print):
         _ws_market_cache["ema9"] = ema
         _ws_market_cache["ema9_series"] = series[:]
 
-        logger(
-            f"WS_KLINE_CLOSE: t={t} close={close} ema9={q(ema,6)}"
-        )
+        # ❗ 로그는 기준선에 있으므로 유지
+        logger(f"WS_KLINE_CLOSE: t={t} close={close} ema9={q(ema,6)}")
 
+    # ========================================================
+    # 🔥 핵심 수정 (이 한 줄이 없어서 2시간 날아감)
+    # - WS 채널 실제 구독
+    # - 5m kline / CLOSE ONLY
+    # ========================================================
+    twm.start_kline_socket(
+        callback=handle_kline,
+        symbol=symbol,
+        interval=KLINE_INTERVAL
+    )
 
     return twm
+
 
 # ------------------------------------------------------------
 # BTC DAILY OPEN (REST / FILTER ONLY)
