@@ -1561,15 +1561,14 @@ def start_ws_kline(symbol, logger=print):
         logger(f"WS_KLINE_CLOSE: t={t} close={close} ema9={q(ema,6)}")
 
     # ========================================================
-    # 🔥 핵심 수정 (이 한 줄이 없어서 2시간 날아감)
-    # - WS 채널 실제 구독
-    # - 5m kline / CLOSE ONLY
+    # FUTURES KLINE SOCKET (PERPETUAL) — 5m / CLOSE ONLY
     # ========================================================
-    twm.start_kline_socket(
+    twm.start_futures_kline_socket(
         callback=handle_kline,
         symbol=symbol,
-        interval=KLINE_INTERVAL
-    )
+        interval=KLINE_INTERVAL,
+)
+
 
     return twm
 
