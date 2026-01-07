@@ -1560,6 +1560,66 @@ def start_ws_kline(symbol, logger=print):
         # ❗ 로그는 기준선에 있으므로 유지
         logger(f"WS_KLINE_CLOSE: t={t} close={close} ema9={q(ema,6)}")
 
+# ------------------------------------------------------------
+# WS KLINE START (5m, CLOSE ONLY) — FUTURES PERPETUAL
+# ------------------------------------------------------------
+def start_ws_kline(symbol, logger=print):
+    twm = ThreadedWebsocketManager(
+        api_key=os.getenv("BINANCE_API_KEY"),
+        api_secret=os.getenv("BINANCE_API_SECRET"),
+    )
+    twm.start()
+
+    def handle_kline(msg):
+        if msg.get("e") != "kline":
+            return
+
+        k = msg.get("k", {})
+        if not k.get("x"):   # ❗ 봉 미종료 무시 (CLOSE ONLY)
+            return
+
+        close = _safe_float(k.get("c"))
+        high  = _safe_float(k.get("h"))
+        low   = _safe_float(k.get("l"))
+        open_ = _safe_float(k.get("o"))
+        t     = int(k.get("T"))  # close time ms
+
+        if close is None:
+            return
+
+        # EMA9 계산 (WS 기준)
+        series = _ws_market_cache["ema9_series"]
+        if not series:
+            ema = close
+        else:
+            kf = 2 / (EMA9_PERIOD + 1)
+            ema = close * kf + series[-1] * (1 - kf)
+
+        series.append(ema)
+        if len(series) > 50:
+            series[:] = series[-50:]
+
+        # V3 SUCCESS PATH — CLOSE PRICE BUFFER (VOLATILITY ONLY)
+        closes = _ws_market_cache["closes"]
+        closes.append(close)
+        if len(closes) > 50:
+            closes[:] = closes[-50:]
+
+        # WS MARKET CACHE (SINGLE SOURCE)
+        _ws_market_cache["kline"] = {
+            "time": t,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "ema9": ema,
+        }
+        _ws_market_cache["ema9"] = ema
+        _ws_market_cache["ema9_series"] = series[:]
+
+        # ❗ 로그는 기준선에 있으므로 유지
+        logger(f"WS_KLINE_CLOSE: t={t} close={close} ema9={q(ema,6)}")
+
     # ========================================================
     # FUTURES KLINE SOCKET (PERPETUAL) — 5m / CLOSE ONLY
     # ========================================================
@@ -1567,10 +1627,10 @@ def start_ws_kline(symbol, logger=print):
         callback=handle_kline,
         symbol=symbol,
         interval=KLINE_INTERVAL,
-)
-
+    )
 
     return twm
+
 
 
 # ------------------------------------------------------------
