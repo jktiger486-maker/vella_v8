@@ -42,7 +42,7 @@ CFG = {
     # =====================================================
     # [ STEP 3 ] 후보 생성
     # =====================================================
-    "08_CAND_BODY_BELOW_EMA": True,
+    "08_CAND_BODY_BELOW_EMA": False,
 
     # =====================================================
     # [ STEP 4 ] BTC SESSION BIAS
@@ -52,7 +52,7 @@ CFG = {
     # =====================================================
     # [ STEP 5 ] EMA SLOPE
     # =====================================================
-    "10_EMA_SLOPE_MIN_PCT": 0.0,
+    "10_EMA_SLOPE_MIN_PCT": -100.0,
     "11_EMA_SLOPE_LOOKBACK_BARS": 0,
 
     # =====================================================
@@ -64,8 +64,8 @@ CFG = {
     # =====================================================
     # [ STEP 6-A ] EMA PROXIMITY
     # =====================================================
-    "38_EMA_TOL_PCT": 0.20,
-    "39_EMA_EPS_PCT": 0.0,
+    "38_EMA_TOL_PCT": 5.00,
+    "39_EMA_EPS_PCT": 1.00,
 
     # =====================================================
     # [ STEP 7 ] 실행 속도 제어
@@ -77,8 +77,8 @@ CFG = {
     # =====================================================
     # [ STEP 8 ] 실행 안전장치
     # =====================================================
-    "17_ENTRY_MAX_PER_CYCLE": 2,
-    "18_MAX_ENTRIES_PER_DAY": 20,
+    "17_ENTRY_MAX_PER_CYCLE": 100,
+    "18_MAX_ENTRIES_PER_DAY": 100,
     "19_DATA_STALE_BLOCK": False,
     "20_EXECUTION_SPREAD_GUARD_ENABLE": False,
     "40_EXECUTION_SPREAD_MAX_PCT": 0.50,
@@ -91,8 +91,8 @@ CFG = {
     "23_REENTRY_SAME_REASON_BLOCK": False,
     "24_ENTRY_LOOKBACK_BARS": 100,
     "25_REENTRY_PRICE_TOL_PCT": 100,
-    "26_CAND_POOL_TTL_BARS": 100,
-    "27_CAND_POOL_MAX_SIZE": 100,
+    "26_CAND_POOL_TTL_BARS": 1000,
+    "27_CAND_POOL_MAX_SIZE": 1000,
     "28_CAND_MIN_GAP_BARS": 0,
 
     # =====================================================
