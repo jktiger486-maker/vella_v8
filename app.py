@@ -248,6 +248,31 @@ def _ms_to_daykey_utc(ms):
 
 
 # ============================================================
+# [ STEP 41 ] ENGINE LOOP IDLE CONTROL
+# - 운영 안정용 STEP
+# - 매매 판단 ❌
+# - state 변경 ❌
+# - bar / entry / exit 시간축 ❌
+# ============================================================
+
+def step_41_loop_idle(cfg):
+    """
+    STEP 41은 '엔진 루프 안정화'를 위한 운영 STEP이다.
+    CFG에 정의된 idle sleep만 집행하며,
+    판단·상태·시장 데이터에는 일절 관여하지 않는다.
+    """
+    sec = cfg.get("41_LOOP_IDLE_SLEEP_SEC")
+    try:
+        sec = float(sec)
+    except Exception:
+        sec = 0.0
+
+    if sec > 0:
+        time.sleep(sec)
+
+
+
+# ============================================================
 # DATA LOADER (REPLAY)
 # ============================================================
 
