@@ -988,14 +988,13 @@ def step_12_fail_safe(cfg, state, logger=print):
 
 
 # ============================================================
-# [ STEP 13 ] EXECUTION — REST ALIGNED VERSION (LIVE ENTRY)
+# [ STEP 13 ] EXECUTION — REST ALIGNED VERSION (ENTRY INTENT)
 # - entry_ready는 1 bar 유효
-# - OPEN은 entry_bar (REST 완료봉) 에서만 허용
-# - position 생성은 STEP 13의 고유 책임
+# - entry_bar (REST 완료봉)에서만 "진입 의도" 확정
+# - ❗ position 생성 금지 (실주문 결과는 STEP 16의 책임)
 # - REST 5분봉 시간축과 1:1 정합
 # ============================================================
 
-# -------------------- BASELINE (DO NOT EDIT) --------------------
 def step_13_execution_live_entry(cfg, market, state, logger=print):
 
     # --------------------------------------------------------
@@ -1017,7 +1016,7 @@ def step_13_execution_live_entry(cfg, market, state, logger=print):
     # REST TIME AXIS CONTRACT
     #
     # 1) current_bar < entry_bar  → 방어
-    # 2) current_bar == entry_bar → LIVE ENTRY (OPEN)
+    # 2) current_bar == entry_bar → ENTRY INTENT 확정
     # 3) current_bar > entry_bar  → ENTRY 만료
     # --------------------------------------------------------
 
@@ -1031,15 +1030,19 @@ def step_13_execution_live_entry(cfg, market, state, logger=print):
         return False
 
     # --------------------------------------------------------
-    # LIVE ENTRY — POSITION OPEN (STEP 13 CORE RESPONSIBILITY)
+    # ENTRY INTENT CONFIRM (❗ POSITION OPEN 금지)
     # --------------------------------------------------------
     entry_price = _safe_float(market.get("close"))
     if entry_price is None:
         return False
 
-    state["position"] = "OPEN"
-    state["position_open_bar"] = current_bar
-    state["entry_price"] = entry_price
+    # ENTRY 의도만 기록 (상태 전이 없음)
+    state["pending_entry"] = {
+        "bar": current_bar,
+        "time": market.get("time"),
+        "price": entry_price,
+        "reason": state.get("entry_reason"),
+    }
 
     # --------------------------------------------------------
     # COUNTERS / TIME AXIS UPDATE
@@ -1058,7 +1061,7 @@ def step_13_execution_live_entry(cfg, market, state, logger=print):
     state["entry_reason"] = None
 
     # --------------------------------------------------------
-    # RECORD (LIVE ENTRY SNAPSHOT)
+    # RECORD (ENTRY INTENT SNAPSHOT)
     # --------------------------------------------------------
     record = {
         "bar": current_bar,
@@ -1066,17 +1069,18 @@ def step_13_execution_live_entry(cfg, market, state, logger=print):
         "price": entry_price,
         "capital_usdt": state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]),
         "reason": state.get("last_entry_reason"),
-        "type": "EXECUTION_LIVE_ENTRY_REST_ALIGNED",
+        "type": "EXECUTION_ENTRY_INTENT_REST_ALIGNED",
     }
     state["execution_records"].append(record)
 
     if cfg.get("32_LOG_EXECUTIONS", True):
         logger(
-            f"STEP13_LIVE_ENTRY: bar={record['bar']} "
+            f"STEP13_ENTRY_INTENT: bar={record['bar']} "
             f"price={record['price']} capital={record['capital_usdt']}"
         )
 
     return True
+
 
 
 # ============================================================
@@ -1223,9 +1227,12 @@ def step_15_exit_judge(cfg, state, market, logger=print):
 
 
 # ============================================================
-# [ STEP 16 ] EXIT EXECUTION
-# - "3봉 확정 → 청산 실행 → 상태 리셋"
-# - 07_ENTRY_EXEC_ENABLE=False면 실주문 ❌, 대신 SIM_EXIT로 상태/손익 갱신은 수행
+# [ STEP 16 ] REAL ORDER & POSITION STATE (SINGLE SOURCE)
+# - ENTRY OPEN / EXIT CLOSE 의 유일한 상태 전이 지점
+# - 07_ENTRY_EXEC_ENABLE=False :
+#     · 실주문 ❌
+#     · SIM_ENTRY / SIM_EXIT 로 상태·손익 갱신만 수행
+# - STEP 13은 ENTRY INTENT만 생성 (position ❌)
 # ============================================================
 
 # Binance enums (optional)
@@ -1236,9 +1243,11 @@ except Exception:
     SIDE_SELL = "SELL"
     ORDER_TYPE_MARKET = "MARKET"
 
+
 def order_adapter_send(symbol, side, quantity, reason, logger=print):
     logger(f"ORDER_ADAPTER_SEND: symbol={symbol} side={side} qty={quantity} reason={reason}")
-    return True
+    return {"status": "FILLED", "avgPrice": None}
+
 
 def _simulate_pnl_short(entry_price, exit_price, capital_usdt):
     ep = _safe_float(entry_price)
@@ -1246,26 +1255,64 @@ def _simulate_pnl_short(entry_price, exit_price, capital_usdt):
     cap = _safe_float(capital_usdt)
     if ep is None or xp is None or cap is None or ep <= 0 or cap <= 0:
         return 0.0
-    # 단순 비율 PnL (레버리지/수수료/수량 계산은 V8에서)
     ret = (ep - xp) / ep
     return cap * ret
 
+
 def step_16_real_order(cfg, state, market, client, logger=print):
-    if not state.get("exit_ready", False):
-        return False
+
     if state.get("order_inflight"):
         return False
     if market is None:
         return False
 
-    # ✅ EXIT 실행은 "항상" 1회 수행 (실주문 OFF라도 SIM_EXIT로 수행)
+    current_bar = int(state.get("bars", 0))
+
+    # ========================================================
+    # ENTRY OPEN (from STEP 13 pending_entry)
+    # ========================================================
+    pending = state.get("pending_entry")
+    if pending and state.get("position") is None:
+        state["order_inflight"] = True
+        try:
+            if cfg.get("07_ENTRY_EXEC_ENABLE", False):
+                result = order_adapter_send(
+                    symbol=cfg["01_TRADE_SYMBOL"],
+                    side=SIDE_SELL,  # SHORT ENTRY
+                    quantity=1,
+                    reason=pending.get("reason"),
+                    logger=logger
+                )
+                filled = result and result.get("status") == "FILLED"
+                entry_price = _safe_float(result.get("avgPrice")) or _safe_float(pending.get("price"))
+            else:
+                logger(f"SIM_ENTRY: reason={pending.get('reason')}")
+                filled = True
+                entry_price = _safe_float(pending.get("price"))
+        finally:
+            state["order_inflight"] = False
+
+        if filled and entry_price is not None:
+            state["position"] = "OPEN"
+            state["position_open_bar"] = current_bar
+            state["entry_price"] = entry_price
+            state["pending_entry"] = None
+
+        # ENTRY 실패 시 상태 변경 ❌
+        return True
+
+    # ========================================================
+    # EXIT CLOSE
+    # ========================================================
+    if not state.get("exit_ready", False):
+        return False
+
     state["order_inflight"] = True
     try:
         if cfg.get("07_ENTRY_EXEC_ENABLE", False):
-            # REAL ORDER PATH (외부 어댑터 호출)
             order_adapter_send(
                 symbol=cfg["01_TRADE_SYMBOL"],
-                side=SIDE_BUY,  # SHORT 청산 = BUY (기본)
+                side=SIDE_BUY,  # SHORT EXIT
                 quantity=1,
                 reason=state.get("exit_reason"),
                 logger=logger
@@ -1275,33 +1322,37 @@ def step_16_real_order(cfg, state, market, client, logger=print):
     finally:
         state["order_inflight"] = False
 
-    # ---- PnL / equity update (record-only simulation) ----
-    exit_price = market.get("close")
-    pnl = _simulate_pnl_short(state.get("entry_price"), exit_price, state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]))
+    # ---- PnL / equity update ----
+    exit_price = _safe_float(market.get("close"))
+    pnl = _simulate_pnl_short(
+        state.get("entry_price"),
+        exit_price,
+        state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"])
+    )
     state["realized_pnl"] = float(state.get("realized_pnl", 0.0)) + float(pnl)
     if state.get("equity") is not None:
         state["equity"] = float(state["equity"]) + float(pnl)
 
-    # ---- TIME AXIS reset ----
+    # ---- POSITION CLOSE (TIME AXIS RESET) ----
     state["position"] = None
     state["position_open_bar"] = None
-    state["last_exit_bar"] = state.get("bars")
+    state["last_exit_bar"] = current_bar
 
-    # cycle reset
+    # ---- cycle reset ----
     state["cycle_id"] = int(state.get("cycle_id", 0)) + 1
     state["entries_in_cycle"] = 0
 
-    # ENTRY reset
+    # ---- ENTRY reset ----
     state["entry_ready"] = False
     state["entry_bar"] = None
     state["entry_reason"] = None
 
-    # candidate reset (유령 후보 방지)
+    # ---- candidate reset ----
     state["has_candidate"] = False
     state["candidates"] = []
     state["last_candidate_bar"] = None
 
-    # EXIT reset
+    # ---- EXIT reset ----
     state["exit_ready"] = False
     state["exit_reason"] = None
     state["exit_signal"] = None
@@ -1309,7 +1360,7 @@ def step_16_real_order(cfg, state, market, client, logger=print):
     state["exit_fired_bar"] = None
     state["exit_fired_signal"] = None
 
-    # SL/TP/TRAIL reset
+    # ---- SL / TP / TRAIL reset ----
     state["entry_price"] = None
     state["sl_price"] = None
     state["tp_price"] = None
@@ -1319,6 +1370,7 @@ def step_16_real_order(cfg, state, market, client, logger=print):
     state["trailing_stop"] = None
 
     return True
+
 
 
 # ============================================================
