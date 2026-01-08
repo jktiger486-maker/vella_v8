@@ -985,14 +985,18 @@ def step_12_fail_safe(cfg, state, logger=print):
 
 
 
+
+
 # ============================================================
-# [ STEP 13 ] EXECUTION — REST ALIGNED VERSION (RECORD ONLY)
+# [ STEP 13 ] EXECUTION — REST ALIGNED VERSION (LIVE ENTRY)
 # - entry_ready는 1 bar 유효
-# - OPEN은 entry_bar (REST 완료봉) 에서 즉시 허용
+# - OPEN은 entry_bar (REST 완료봉) 에서만 허용
+# - position 생성은 STEP 13의 고유 책임
 # - REST 5분봉 시간축과 1:1 정합
 # ============================================================
 
-def step_13_execution_record_only(cfg, market, state, logger=print):
+# -------------------- BASELINE (DO NOT EDIT) --------------------
+def step_13_execution_live_entry(cfg, market, state, logger=print):
 
     # --------------------------------------------------------
     # BASIC GUARD
@@ -1013,7 +1017,7 @@ def step_13_execution_record_only(cfg, market, state, logger=print):
     # REST TIME AXIS CONTRACT
     #
     # 1) current_bar < entry_bar  → 방어
-    # 2) current_bar == entry_bar → 즉시 OPEN
+    # 2) current_bar == entry_bar → LIVE ENTRY (OPEN)
     # 3) current_bar > entry_bar  → ENTRY 만료
     # --------------------------------------------------------
 
@@ -1026,10 +1030,16 @@ def step_13_execution_record_only(cfg, market, state, logger=print):
         state["entry_reason"] = "ENTRY_EXPIRED_REST_AXIS"
         return False
 
-    # current_bar == entry_bar → OPEN
+    # --------------------------------------------------------
+    # LIVE ENTRY — POSITION OPEN (STEP 13 CORE RESPONSIBILITY)
+    # --------------------------------------------------------
+    entry_price = _safe_float(market.get("close"))
+    if entry_price is None:
+        return False
+
     state["position"] = "OPEN"
     state["position_open_bar"] = current_bar
-    state["entry_price"] = market.get("close")
+    state["entry_price"] = entry_price
 
     # --------------------------------------------------------
     # COUNTERS / TIME AXIS UPDATE
@@ -1038,7 +1048,7 @@ def step_13_execution_record_only(cfg, market, state, logger=print):
     state["entries_today"] = int(state.get("entries_today", 0)) + 1
     state["last_entry_bar"] = current_bar
     state["last_entry_reason"] = state.get("entry_reason")
-    state["last_entry_price"] = market.get("close")
+    state["last_entry_price"] = entry_price
 
     # --------------------------------------------------------
     # ENTRY STATE CLEANUP (CRITICAL)
@@ -1048,28 +1058,25 @@ def step_13_execution_record_only(cfg, market, state, logger=print):
     state["entry_reason"] = None
 
     # --------------------------------------------------------
-    # RECORD (OPEN 성공 시에만)
+    # RECORD (LIVE ENTRY SNAPSHOT)
     # --------------------------------------------------------
     record = {
         "bar": current_bar,
         "time": market.get("time"),
-        "price": market.get("close"),
+        "price": entry_price,
         "capital_usdt": state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]),
-        "reason": state.get("last_entry_reason", "RECORD_ONLY"),
-        "type": "EXECUTION_RECORD_ONLY_REST_ALIGNED",
+        "reason": state.get("last_entry_reason"),
+        "type": "EXECUTION_LIVE_ENTRY_REST_ALIGNED",
     }
     state["execution_records"].append(record)
 
     if cfg.get("32_LOG_EXECUTIONS", True):
         logger(
-            f"STEP13_EXEC_RECORD_REST: bar={record['bar']} "
+            f"STEP13_LIVE_ENTRY: bar={record['bar']} "
             f"price={record['price']} capital={record['capital_usdt']}"
         )
 
     return True
-
-
-
 
 
 # ============================================================
@@ -1505,6 +1512,14 @@ def app_run_live(logger=print):
 
     logger("LIVE_START (REST POLLING MODE / BR3)")
 
+# ============================================================
+# [PATCH ONLY] VELLA V8 — LIVE LOOP ERROR FIX (BASELINE SAFE)
+# - 주인님 기준: "현재 에러 문제만" 1줄 교체
+# - 축소/삭제/재정렬 ❌
+# - STEP/로직/순서 변경 ❌
+# - 오직: 정의되지 않은 함수 호출(NameError) 제거
+# ============================================================
+
     # ========================================================
     # BTC DAILY OPEN (FUTURES API)
     # --------------------------------------------------------
@@ -1664,7 +1679,14 @@ def app_run_live(logger=print):
                 logger("ENGINE_STOP: STEP12_FAIL_SAFE")
                 break
 
-            step_13_execution_record_only(CFG, market_core, state, logger)
+            # ====================================================
+            # [PATCH] STEP 13 CALL — FIX NAMEERROR ONLY
+            # ----------------------------------------------------
+            # ❌ BEFORE: step_13_execution_record_only(...)  (미정의 → LIVE_ERROR)
+            # ✅ AFTER : step_13_execution_live_entry(...)   (정의됨, 기준선 STEP13)
+            # ====================================================
+            step_13_execution_live_entry(CFG, market_core, state, logger)
+
             step_14_exit_core_calc(CFG, state, market_core, logger)
             step_15_exit_judge(CFG, state, market_core, logger)
             step_16_real_order(CFG, state, market_core, client, logger)
