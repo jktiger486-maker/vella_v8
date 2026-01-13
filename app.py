@@ -52,7 +52,7 @@ CFG = {
     # =====================================================
     # [ STEP 5 ] EMA SLOPE
     # =====================================================
-    "10_EMA_SLOPE_MIN_PCT": -100.0,
+    "10_EMA_SLOPE_MIN_PCT": 0.0,
     "11_EMA_SLOPE_LOOKBACK_BARS": 0,
 
     # =====================================================
@@ -77,8 +77,8 @@ CFG = {
     # =====================================================
     # [ STEP 8 ] 실행 안전장치
     # =====================================================
-    "17_ENTRY_MAX_PER_CYCLE": 100,
-    "18_MAX_ENTRIES_PER_DAY": 100,
+    "17_ENTRY_MAX_PER_CYCLE": 0,
+    "18_MAX_ENTRIES_PER_DAY": 0,
     "19_DATA_STALE_BLOCK": False,
     "20_EXECUTION_SPREAD_GUARD_ENABLE": False,
     "40_EXECUTION_SPREAD_MAX_PCT": 0.50,
@@ -119,14 +119,6 @@ CFG = {
     "35_SL_PCT": 0.60,
     "36_TP_PCT": 0.80,
     "37_TRAILING_PCT": 0.40,
-
-    # =====================================================
-    # [ STEP 41 ] ENGINE LOOP IDLE CONTROL (OPERATION ONLY)
-    # - BAR / ENTRY / EXIT 시간축과 무관
-    # - 매매 확인 단계 기본값 = 0.0 (대기 없음)
-    # =====================================================
-    "41_LOOP_IDLE_SLEEP_SEC": 0.0,
-
 }
 
 
@@ -245,31 +237,6 @@ def _ms_to_daykey_utc(ms):
         return int(int(ms) // 86400000)
     except Exception:
         return None
-
-
-# ============================================================
-# [ STEP 41 ] ENGINE LOOP IDLE CONTROL
-# - 운영 안정용 STEP
-# - 매매 판단 ❌
-# - state 변경 ❌
-# - bar / entry / exit 시간축 ❌
-# ============================================================
-
-def step_41_loop_idle(cfg):
-    """
-    STEP 41은 '엔진 루프 안정화'를 위한 운영 STEP이다.
-    CFG에 정의된 idle sleep만 집행하며,
-    판단·상태·시장 데이터에는 일절 관여하지 않는다.
-    """
-    sec = cfg.get("41_LOOP_IDLE_SLEEP_SEC")
-    try:
-        sec = float(sec)
-    except Exception:
-        sec = 0.0
-
-    if sec > 0:
-        time.sleep(sec)
-
 
 
 # ============================================================
@@ -430,12 +397,12 @@ def step_3_generate_candidates(cfg, market, state, logger=print):
             logger(f"STEP3_NEW_CANDIDATE: bar={state['bars']} t={t} low={low} ema9={ema9}")
 
 
-
 # ============================================================
-# [ STEP 4 ] BTC SESSION BIAS (ENTRY GATE ONLY) — LOG ENHANCED
+# [ STEP 4 ] BTC SESSION BIAS (ENTRY GATE ONLY)
 # ------------------------------------------------------------
-# ⚠️ 로직 동일 / 판단 동일
-# ✅ 차단 사유를 AWS 로그에서 즉시 식별 가능
+# [19~26] 체크리스트 준수
+# [-1] BTC_BIAS는 후보 생성과 무관 (STEP3)
+# [-2] BTC_BIAS는 ENTRY 허용(gate)만 차단
 # ============================================================
 
 def step_4_btc_session_bias(cfg, btc_ctx, state, logger=print):
@@ -449,7 +416,6 @@ def step_4_btc_session_bias(cfg, btc_ctx, state, logger=print):
     if btc_ctx is None or btc_ctx.get("daily_open") is None or btc_ctx.get("price") is None:
         state["gate_ok"] = False
         state["gate_reason"] = "BTC_CTX_MISSING"
-        logger("STEP4_BLOCK: BTC_CTX_MISSING")
         return False
 
     daily_open = _safe_float(btc_ctx.get("daily_open"))
@@ -457,7 +423,6 @@ def step_4_btc_session_bias(cfg, btc_ctx, state, logger=print):
     if daily_open is None or price is None:
         state["gate_ok"] = False
         state["gate_reason"] = "BTC_CTX_INVALID"
-        logger("STEP4_BLOCK: BTC_CTX_INVALID")
         return False
 
     if price < daily_open:
@@ -466,16 +431,16 @@ def step_4_btc_session_bias(cfg, btc_ctx, state, logger=print):
 
     state["gate_ok"] = False
     state["gate_reason"] = f"BTC_BIAS_BLOCK (price={q(price,4)} >= open={q(daily_open,4)})"
-    logger(f"STEP4_BLOCK: {state['gate_reason']}")
     return False
-
 
 
 # ============================================================
 # [ STEP 5 ] EMA SLOPE GATE (GATE PRODUCER / TRUE PULSE)
-# ------------------------------ LOG ENHANCED -----------------
-# ⚠️ 로직 동일 / 판정식 동일
-# ✅ gate 생산 결과를 AWS 로그에서 즉시 식별
+# ------------------------------------------------------------
+# 계약:
+# - gate_ok는 반드시 여기서 매 bar 생산된다 (TRUE PULSE)
+# - CFG ON/OFF와 무관하게 gate_ok는 항상 True/False로 덮어쓴다
+# - 다른 STEP은 gate_ok=False만 찍을 수 있음
 # ============================================================
 
 def step_5_ema_slope_gate(cfg, ema_ctx, state, logger=print):
@@ -487,12 +452,13 @@ def step_5_ema_slope_gate(cfg, ema_ctx, state, logger=print):
     lb = int(cfg["11_EMA_SLOPE_LOOKBACK_BARS"] or 0)
 
     # ========================================================
-    # EMA SLOPE GATE OFF (CFG 기준)
+    # EMA SLOPE GATE OFF (CFG 기준) → gate_ok = True 생산
+    # --------------------------------------------------------
+    # TRUE/FALSE 맘대로 바꿔도 에러 없음
     # ========================================================
     if min_pct == 0 and lb == 0:
         state["gate_ok"] = True
         state["gate_reason"] = "EMA_SLOPE_GATE_OFF"
-        logger("STEP5_PASS: EMA_SLOPE_GATE_OFF")
         return True
 
     # ========================================================
@@ -501,14 +467,12 @@ def step_5_ema_slope_gate(cfg, ema_ctx, state, logger=print):
     if ema_ctx is None or not ema_ctx.get("ema9_series"):
         state["gate_ok"] = False
         state["gate_reason"] = "EMA_CTX_MISSING"
-        logger("STEP5_BLOCK: EMA_CTX_MISSING")
         return False
 
     series = ema_ctx["ema9_series"]
     if len(series) <= lb:
         state["gate_ok"] = False
         state["gate_reason"] = "EMA_SERIES_TOO_SHORT"
-        logger(f"STEP5_BLOCK: EMA_SERIES_TOO_SHORT len={len(series)} lb={lb}")
         return False
 
     ema_now = _safe_float(series[-1])
@@ -516,7 +480,6 @@ def step_5_ema_slope_gate(cfg, ema_ctx, state, logger=print):
     if ema_now is None or ema_prev is None or ema_prev == 0:
         state["gate_ok"] = False
         state["gate_reason"] = "EMA_INVALID"
-        logger("STEP5_BLOCK: EMA_INVALID")
         return False
 
     slope_pct = (ema_now - ema_prev) / ema_prev * 100.0
@@ -531,21 +494,13 @@ def step_5_ema_slope_gate(cfg, ema_ctx, state, logger=print):
 
     state["gate_ok"] = bool(ok)
     state["gate_reason"] = f"EMA_SLOPE_OK={ok} slope_pct={q(slope_pct,4)}"
-
-    if ok:
-        logger(f"STEP5_PASS: slope_pct={q(slope_pct,4)}")
-    else:
-        logger(f"STEP5_BLOCK: slope_pct={q(slope_pct,4)} min_pct={min_pct}")
-
     return bool(ok)
 
-
-
 # ============================================================
-# [ STEP 6 ] ENTRY JUDGEMENT — LOG ENHANCED (NO LOGIC CHANGE)
-# ------------------------------------------------------------
-# ⚠️ 기준선 로직/출력/시간선 동일
-# ✅ ENTRY 거부 사유를 AWS 로그에서 즉시 식별
+# [ STEP 6 ] ENTRY JUDGEMENT (LIVE CONTRACT / NO ORDER)
+# - 브8 기준선 정합 버전 (브3 성공 특성 반영)
+# - 역할: gate 통과 + 후보 존재 + EMA 근접(완화) → entry_ready
+# - 비역할: 후보 관리/시간축/재진입/과잉 안전 (전부 제거)
 # ============================================================
 
 def step_6_entry_judge(cfg, market, state, logger=print):
@@ -555,7 +510,6 @@ def step_6_entry_judge(cfg, market, state, logger=print):
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "EXIT_IN_PROGRESS"
-        logger("STEP6_DENY: EXIT_IN_PROGRESS")
         return False
 
     # ---- GATE ----
@@ -564,7 +518,6 @@ def step_6_entry_judge(cfg, market, state, logger=print):
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = state.get("gate_reason") or "GATE_BLOCK"
-        logger(f"STEP6_DENY: GATE_BLOCK reason={state['entry_reason']}")
         return False
 
     # ---- CANDIDATE (존재만 확인) ----
@@ -573,7 +526,6 @@ def step_6_entry_judge(cfg, market, state, logger=print):
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "NO_CANDIDATE"
-        logger("STEP6_DENY: NO_CANDIDATE")
         return False
 
     # ---- MARKET ----
@@ -581,7 +533,6 @@ def step_6_entry_judge(cfg, market, state, logger=print):
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "MARKET_MISSING"
-        logger("STEP6_DENY: MARKET_MISSING")
         return False
 
     close = _safe_float(market.get("close"))
@@ -590,7 +541,6 @@ def step_6_entry_judge(cfg, market, state, logger=print):
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "PRICE_OR_EMA_MISSING"
-        logger("STEP6_DENY: PRICE_OR_EMA_MISSING")
         return False
 
     # ========================================================
@@ -607,14 +557,10 @@ def step_6_entry_judge(cfg, market, state, logger=print):
         state["entry_ready"] = False
         state["entry_bar"] = None
         state["entry_reason"] = "EMA_DISTANCE_EXCEEDED"
-        logger(
-            f"STEP6_DENY: EMA_DISTANCE_EXCEEDED "
-            f"close={q(close,6)} ema9={q(ema9,6)} band={q(band,6)}"
-        )
         return False
 
     # ========================================================
-    # CFG 12 — MIN PRICE MOVE
+    # CFG 12 — MIN PRICE MOVE (OFF-SAFE, 존재만)
     # ========================================================
     min_move_pct = float(cfg.get("12_EXECUTION_MIN_PRICE_MOVE_PCT", 0.0))
     if min_move_pct > 0:
@@ -626,14 +572,11 @@ def step_6_entry_judge(cfg, market, state, logger=print):
                 state["entry_ready"] = False
                 state["entry_bar"] = None
                 state["entry_reason"] = "MIN_PRICE_MOVE_BLOCK"
-                logger(
-                    f"STEP6_DENY: MIN_PRICE_MOVE_BLOCK "
-                    f"move_pct={q(move_pct,4)} < min={q(min_move_pct,4)}"
-                )
                 return False
+    # min_move_pct == 0 → 완전 무시 (OFF SAFE)
 
     # ========================================================
-    # CFG 13 — ONLY ON NEW LOW
+    # CFG 13 — ONLY ON NEW LOW (OFF-SAFE, 존재만)
     # ========================================================
     if cfg.get("13_EXECUTION_ONLY_ON_NEW_LOW", False):
         last_cand = candidates[-1]
@@ -642,35 +585,29 @@ def step_6_entry_judge(cfg, market, state, logger=print):
             state["entry_ready"] = False
             state["entry_bar"] = None
             state["entry_reason"] = "ONLY_ON_NEW_LOW_BLOCK"
-            logger(
-                f"STEP6_DENY: ONLY_ON_NEW_LOW_BLOCK "
-                f"close={q(close,6)} trigger={q(trigger,6)}"
-            )
             return False
+    # False → 완전 무시 (OFF SAFE)
 
     # ========================================================
-    # ENTRY 허가
+    # ENTRY 허가 (STEP 6의 유일한 출력)
     # ========================================================
     if state.get("position") is None:
         state["entry_ready"] = True
         state["entry_bar"] = state.get("bars")
         state["entry_reason"] = "STEP6_PASS"
-        logger(f"STEP6_PASS: entry_bar={state['entry_bar']}")
         return True
 
     state["entry_ready"] = False
     state["entry_bar"] = None
     state["entry_reason"] = "POSITION_EXISTS"
-    logger("STEP6_DENY: POSITION_EXISTS")
     return False
 
 
 
 # ============================================================
-# [ STEP 7 ] EXECUTION TEMPO CONTROL — LOG ENHANCED
-# ------------------------------------------------------------
-# ⚠️ 로직 동일 / 시간선 동일 / gate 계약 유지
-# ✅ 쿨다운 차단 원인을 AWS 로그에서 즉시 식별
+# [ STEP 7 ] EXECUTION TEMPO CONTROL (COOLDOWN)
+# - 14/15/16 집행
+# - gate_ok를 '강제 True'로 만들지 않는다 (차단만 담당)
 # ============================================================
 
 def step_7_execution_tempo_control(cfg, state, logger=print):
@@ -692,29 +629,20 @@ def step_7_execution_tempo_control(cfg, state, logger=print):
     if last_exit_bar is None:
         return True
 
-    cur_bar = int(state.get("bars", 0))
-    last_exit_bar = int(last_exit_bar)
-
-    if (cur_bar - last_exit_bar) < cd:
-        remaining = cd - (cur_bar - last_exit_bar)
+    if (state.get("bars", 0) - int(last_exit_bar)) < cd:
         state["gate_ok"] = False
-        state["gate_reason"] = f"COOLDOWN_BLOCK remaining={remaining}"
-        logger(
-            f"STEP7_BLOCK: COOLDOWN_BLOCK "
-            f"cur_bar={cur_bar} last_exit_bar={last_exit_bar} "
-            f"remaining={remaining}"
-        )
+        state["gate_reason"] = f"COOLDOWN_BLOCK remaining={cd - (state['bars'] - int(last_exit_bar))}"
         return False
 
     return True
 
 
-
 # ============================================================
-# [ STEP 8 ] EXECUTION SAFETY GUARD — LOG ENHANCED
-# ------------------------------------------------------------
-# ⚠️ 로직 동일 / 차단 조건 동일
-# ✅ 어떤 SAFETY에 막혔는지 AWS 로그에서 즉시 식별
+# [ STEP 8 ] EXECUTION SAFETY GUARD
+# - 17_ENTRY_MAX_PER_CYCLE 집행
+# - 18_MAX_ENTRIES_PER_DAY 집행 (UTC daykey)
+# - 19_DATA_STALE_BLOCK 집행
+# - 20_SPREAD_GUARD 집행 (CFG 정식)
 # ============================================================
 
 def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
@@ -740,7 +668,6 @@ def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
     ):
         state["gate_ok"] = False
         state["gate_reason"] = f"MAX_ENTRY_PER_CYCLE_BLOCK limit={max_cycle}"
-        logger(f"STEP8_BLOCK: {state['gate_reason']}")
         return False
 
     # --------------------------------------------------------
@@ -757,7 +684,6 @@ def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
             if state.get("day_key") != dk:
                 state["day_key"] = dk
                 state["entries_today"] = 0
-                logger(f"STEP8_INFO: DAY_KEY_RESET dk={dk}")
 
         if (
             int(state.get("entries_today", 0)) >= max_day
@@ -765,7 +691,6 @@ def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
         ):
             state["gate_ok"] = False
             state["gate_reason"] = f"MAX_ENTRIES_PER_DAY_BLOCK limit={max_day}"
-            logger(f"STEP8_BLOCK: {state['gate_reason']}")
             return False
 
     if safety_ctx is None:
@@ -778,11 +703,10 @@ def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
         if safety_ctx.get("is_stale"):
             state["gate_ok"] = False
             state["gate_reason"] = f"DATA_STALE_BLOCK age_ms={safety_ctx.get('age_ms')}"
-            logger(f"STEP8_BLOCK: {state['gate_reason']}")
             return False
 
     # --------------------------------------------------------
-    # spread guard
+    # spread guard (CFG ONLY, HARD CODE ❌)
     # --------------------------------------------------------
     if cfg["20_EXECUTION_SPREAD_GUARD_ENABLE"]:
         spread_pct = safety_ctx.get("spread_pct")
@@ -791,7 +715,6 @@ def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
         if spread_pct is None:
             state["gate_ok"] = False
             state["gate_reason"] = "SPREAD_CTX_MISSING"
-            logger("STEP8_BLOCK: SPREAD_CTX_MISSING")
             return False
 
         if float(spread_pct) > max_spread:
@@ -800,7 +723,6 @@ def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
                 f"SPREAD_BLOCK spread_pct={q(spread_pct,4)} "
                 f"> max={q(max_spread,4)}"
             )
-            logger(f"STEP8_BLOCK: {state['gate_reason']}")
             return False
 
     return True
@@ -808,10 +730,9 @@ def step_8_execution_safety_guard(cfg, safety_ctx, state, logger=print):
 
 
 # ============================================================
-# [ STEP 9 ] REENTRY / CANDIDATE HYGIENE — LOG ENHANCED
-# ------------------------------------------------------------
-# ⚠️ 로직 동일 / 후보 정리·재진입 차단 조건 동일
-# ✅ TTL / POOL / REENTRY 중 차단 지점 즉시 식별
+# [ STEP 9 ] REENTRY / CANDIDATE HYGIENE
+# - 후보 풀 TTL / MAX SIZE 집행
+# - 재진입 쿨다운/사유/가격 허용오차 집행(ENTRY GATE 차단)
 # ============================================================
 
 def step_9_reentry_candidate_hygiene(cfg, market, state, logger=print):
@@ -826,41 +747,31 @@ def step_9_reentry_candidate_hygiene(cfg, market, state, logger=print):
     ttl = int(cfg.get("26_CAND_POOL_TTL_BARS", 0) or 0)
     if ttl > 0 and state.get("candidates"):
         now_bar = int(state.get("bars", 0))
-        before = len(state.get("candidates"))
         state["candidates"] = [c for c in state["candidates"] if (now_bar - int(c.get("bar", now_bar))) <= ttl]
         state["has_candidate"] = len(state["candidates"]) > 0
-        after = len(state.get("candidates"))
-        if before != after:
-            logger(f"STEP9_INFO: CAND_TTL_TRIM before={before} after={after} ttl={ttl}")
 
     # ---- candidate max size ----
     mx = int(cfg.get("27_CAND_POOL_MAX_SIZE", 0) or 0)
     if mx > 0 and len(state.get("candidates", [])) > mx:
-        before = len(state.get("candidates"))
         state["candidates"] = state["candidates"][-mx:]
         state["has_candidate"] = len(state["candidates"]) > 0
-        logger(f"STEP9_INFO: CAND_POOL_TRIM before={before} after={len(state['candidates'])} max={mx}")
 
     # ---- reentry cooldown (bars since last entry) ----
     cd_entry = int(cfg.get("21_ENTRY_COOLDOWN_BARS", 0) or 0)
     last_entry_bar = state.get("last_entry_bar")
     if cd_entry > 0 and last_entry_bar is not None and state.get("position") is None:
-        gap = int(state.get("bars", 0)) - int(last_entry_bar)
-        if gap < cd_entry:
+        if (state.get("bars", 0) - int(last_entry_bar)) < cd_entry:
             state["gate_ok"] = False
             state["gate_reason"] = f"REENTRY_ENTRY_COOLDOWN_BLOCK bars={cd_entry}"
-            logger(f"STEP9_BLOCK: {state['gate_reason']} gap={gap}")
             return False
 
     # ---- cooldown after exit ----
     cd_exit = int(cfg.get("22_ENTRY_COOLDOWN_AFTER_EXIT", 0) or 0)
     last_exit_bar = state.get("last_exit_bar")
     if cd_exit > 0 and last_exit_bar is not None and state.get("position") is None:
-        gap = int(state.get("bars", 0)) - int(last_exit_bar)
-        if gap < cd_exit:
+        if (state.get("bars", 0) - int(last_exit_bar)) < cd_exit:
             state["gate_ok"] = False
             state["gate_reason"] = f"REENTRY_AFTER_EXIT_COOLDOWN_BLOCK bars={cd_exit}"
-            logger(f"STEP9_BLOCK: {state['gate_reason']} gap={gap}")
             return False
 
     # ---- same reason block ----
@@ -868,7 +779,6 @@ def step_9_reentry_candidate_hygiene(cfg, market, state, logger=print):
         if state.get("last_entry_reason") and state.get("entry_reason") == state.get("last_entry_reason"):
             state["gate_ok"] = False
             state["gate_reason"] = "REENTRY_SAME_REASON_BLOCK"
-            logger("STEP9_BLOCK: REENTRY_SAME_REASON_BLOCK")
             return False
 
     # ---- reentry price tolerance ----
@@ -881,18 +791,13 @@ def step_9_reentry_candidate_hygiene(cfg, market, state, logger=print):
             if diff_pct > tol_pct:
                 state["gate_ok"] = False
                 state["gate_reason"] = f"REENTRY_PRICE_TOL_BLOCK diff_pct={q(diff_pct,4)} > tol={q(tol_pct,4)}"
-                logger(f"STEP9_BLOCK: {state['gate_reason']}")
                 return False
 
     return True
 
 
-
 # ============================================================
-# [ STEP 10 ] VOLATILITY PROTECTION — LOG ENHANCED
-# ------------------------------------------------------------
-# ⚠️ 로직 동일 / 차단 기준 동일
-# ✅ 변동성 차단 사유를 AWS 로그에서 즉시 식별
+# [ STEP 10 ] VOLATILITY PROTECTION
 # ============================================================
 
 def step_10_volatility_protection(cfg, vol_ctx, state, logger=print):
@@ -906,7 +811,6 @@ def step_10_volatility_protection(cfg, vol_ctx, state, logger=print):
     if vol_ctx is None or vol_ctx.get("volatility_pct") is None:
         state["gate_ok"] = False
         state["gate_reason"] = "VOL_CTX_MISSING"
-        logger("STEP10_BLOCK: VOL_CTX_MISSING")
         return False
 
     v = float(vol_ctx["volatility_pct"])
@@ -915,39 +819,22 @@ def step_10_volatility_protection(cfg, vol_ctx, state, logger=print):
     if v > max_v:
         state["gate_ok"] = False
         state["gate_reason"] = f"VOL_BLOCK v={q(v,4)} > max={q(max_v,4)}"
-        logger(f"STEP10_BLOCK: {state['gate_reason']}")
         return False
 
     return True
 
 
 
+
+
 # ============================================================
-# [ STEP 11 ] OBSERVABILITY — LOG SNAPSHOT ONLY
-# ------------------------------------------------------------
-# ⚠️ 상태 변경 ❌ / 판단 개입 ❌ / gate 영향 ❌
-# ✅ 현재 엔진 상태를 “관찰용”으로만 출력
+# [ STEP 11 ] OBSERVABILITY (READY)
 # ============================================================
 
 def step_11_observability(cfg, state, logger=print):
     for k in ["31_LOG_CANDIDATES", "32_LOG_EXECUTIONS"]:
         if k not in cfg:
             raise RuntimeError(f"CFG_MISSING_KEY_STEP11: {k}")
-
-    # --------------------------------------------------------
-    # SNAPSHOT (READ ONLY)
-    # --------------------------------------------------------
-    if cfg.get("31_LOG_CANDIDATES", False):
-        logger(
-            "STEP11_SNAPSHOT: "
-            f"bar={state.get('bars')} "
-            f"cands={len(state.get('candidates', []))} "
-            f"has_candidate={state.get('has_candidate')} "
-            f"gate_ok={state.get('gate_ok')} "
-            f"entry_ready={state.get('entry_ready')} "
-            f"position={state.get('position')}"
-        )
-
     return True
 
 
@@ -984,18 +871,105 @@ def step_12_fail_safe(cfg, state, logger=print):
     return True
 
 
+# ============================================================
+# [ STEP 13 ] EXECUTION — LIVE CONTRACT (RECORD ONLY)
+# - entry_ready는 1 bar 유효
+# - OPEN은 entry_bar + 1 bar에서만 허용
+# - OPEN 성공 시 entry 상태 즉시 소거
+# ============================================================
 
+# ❌❌❌ OLD VERSION — 기준선 봉인 (REST TIME AXIS 불일치)
+# ❌❌❌ 기존 코드 절대 수정/삭제 금지
+# ❌❌❌ 기록용 주석 처리
+#
+# def step_13_execution_record_only(cfg, market, state, logger=print):
+#
+#     # --------------------------------------------------------
+#     # BASIC GUARD
+#     # --------------------------------------------------------
+#     if not state.get("entry_ready", False):
+#         return False
+#     if market is None:
+#         return False
+#     if state.get("entry_bar") is None:
+#         return False
+#     if state.get("position") is not None:
+#         return False
+#
+#     current_bar = int(state.get("bars", 0))
+#     entry_bar = int(state["entry_bar"])
+#
+#     # --------------------------------------------------------
+#     # LIVE CONTRACT — TIME AXIS (STRICT)
+#     #
+#     # 1) current_bar == entry_bar       → 대기 (아무 것도 안 함)
+#     # 2) current_bar == entry_bar + 1   → OPEN 허용 (유일)
+#     # 3) current_bar >  entry_bar + 1   → ENTRY 만료
+#     # --------------------------------------------------------
+#
+#     # 1) 같은 bar → 대기
+#     if current_bar == entry_bar:
+#         return False
+#
+#     # 3) 시간 초과 → 만료
+#     if current_bar > entry_bar + 1:
+#         state["entry_ready"] = False
+#         state["entry_bar"] = None
+#         state["entry_reason"] = "ENTRY_EXPIRED_TIME_AXIS"
+#         return False
+#
+#     # 2) 정확히 다음 bar → OPEN
+#     # (여기 도달 조건 = current_bar == entry_bar + 1)
+#     state["position"] = "OPEN"
+#     state["position_open_bar"] = current_bar
+#     state["entry_price"] = market.get("close")
+#
+#     # --------------------------------------------------------
+#     # COUNTERS / TIME AXIS UPDATE
+#     # --------------------------------------------------------
+#     state["entries_in_cycle"] = int(state.get("entries_in_cycle", 0)) + 1
+#     state["entries_today"] = int(state.get("entries_today", 0)) + 1
+#     state["last_entry_bar"] = current_bar
+#     state["last_entry_reason"] = state.get("entry_reason")
+#     state["last_entry_price"] = market.get("close")
+#
+#     # --------------------------------------------------------
+#     # ENTRY STATE CLEANUP (CRITICAL)
+#     # --------------------------------------------------------
+#     state["entry_ready"] = False
+#     state["entry_bar"] = None
+#     state["entry_reason"] = None
+#
+#     # --------------------------------------------------------
+#     # RECORD (OPEN 성공 시에만)
+#     # --------------------------------------------------------
+#     record = {
+#         "bar": current_bar,
+#         "time": market.get("time"),
+#         "price": market.get("close"),
+#         "capital_usdt": state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]),
+#         "reason": state.get("last_entry_reason", "RECORD_ONLY"),
+#         "type": "EXECUTION_RECORD_ONLY",
+#     }
+#     state["execution_records"].append(record)
+#
+#     if cfg.get("32_LOG_EXECUTIONS", True):
+#         logger(
+#             f"STEP13_EXEC_RECORD: bar={record['bar']} "
+#             f"price={record['price']} capital={record['capital_usdt']}"
+#         )
+#
+#     return True
 
 
 # ============================================================
-# [ STEP 13 ] EXECUTION — REST ALIGNED VERSION (ENTRY INTENT)
+# [ STEP 13 ] EXECUTION — REST ALIGNED VERSION (RECORD ONLY)
 # - entry_ready는 1 bar 유효
-# - entry_bar (REST 완료봉)에서만 "진입 의도" 확정
-# - ❗ position 생성 금지 (실주문 결과는 STEP 16의 책임)
+# - OPEN은 entry_bar (REST 완료봉) 에서 즉시 허용
 # - REST 5분봉 시간축과 1:1 정합
 # ============================================================
 
-def step_13_execution_live_entry(cfg, market, state, logger=print):
+def step_13_execution_record_only(cfg, market, state, logger=print):
 
     # --------------------------------------------------------
     # BASIC GUARD
@@ -1016,7 +990,7 @@ def step_13_execution_live_entry(cfg, market, state, logger=print):
     # REST TIME AXIS CONTRACT
     #
     # 1) current_bar < entry_bar  → 방어
-    # 2) current_bar == entry_bar → ENTRY INTENT 확정
+    # 2) current_bar == entry_bar → 즉시 OPEN
     # 3) current_bar > entry_bar  → ENTRY 만료
     # --------------------------------------------------------
 
@@ -1029,20 +1003,10 @@ def step_13_execution_live_entry(cfg, market, state, logger=print):
         state["entry_reason"] = "ENTRY_EXPIRED_REST_AXIS"
         return False
 
-    # --------------------------------------------------------
-    # ENTRY INTENT CONFIRM (❗ POSITION OPEN 금지)
-    # --------------------------------------------------------
-    entry_price = _safe_float(market.get("close"))
-    if entry_price is None:
-        return False
-
-    # ENTRY 의도만 기록 (상태 전이 없음)
-    state["pending_entry"] = {
-        "bar": current_bar,
-        "time": market.get("time"),
-        "price": entry_price,
-        "reason": state.get("entry_reason"),
-    }
+    # current_bar == entry_bar → OPEN
+    state["position"] = "OPEN"
+    state["position_open_bar"] = current_bar
+    state["entry_price"] = market.get("close")
 
     # --------------------------------------------------------
     # COUNTERS / TIME AXIS UPDATE
@@ -1051,7 +1015,7 @@ def step_13_execution_live_entry(cfg, market, state, logger=print):
     state["entries_today"] = int(state.get("entries_today", 0)) + 1
     state["last_entry_bar"] = current_bar
     state["last_entry_reason"] = state.get("entry_reason")
-    state["last_entry_price"] = entry_price
+    state["last_entry_price"] = market.get("close")
 
     # --------------------------------------------------------
     # ENTRY STATE CLEANUP (CRITICAL)
@@ -1061,21 +1025,21 @@ def step_13_execution_live_entry(cfg, market, state, logger=print):
     state["entry_reason"] = None
 
     # --------------------------------------------------------
-    # RECORD (ENTRY INTENT SNAPSHOT)
+    # RECORD (OPEN 성공 시에만)
     # --------------------------------------------------------
     record = {
         "bar": current_bar,
         "time": market.get("time"),
-        "price": entry_price,
+        "price": market.get("close"),
         "capital_usdt": state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]),
-        "reason": state.get("last_entry_reason"),
-        "type": "EXECUTION_ENTRY_INTENT_REST_ALIGNED",
+        "reason": state.get("last_entry_reason", "RECORD_ONLY"),
+        "type": "EXECUTION_RECORD_ONLY_REST_ALIGNED",
     }
     state["execution_records"].append(record)
 
     if cfg.get("32_LOG_EXECUTIONS", True):
         logger(
-            f"STEP13_ENTRY_INTENT: bar={record['bar']} "
+            f"STEP13_EXEC_RECORD_REST: bar={record['bar']} "
             f"price={record['price']} capital={record['capital_usdt']}"
         )
 
@@ -1083,8 +1047,10 @@ def step_13_execution_live_entry(cfg, market, state, logger=print):
 
 
 
+
+
 # ============================================================
-# [ STEP 14 ] EXIT CORE CALC (SL/TP/TRAIL)
+# [ STEP 14 ] EXIT CORE CALC (SL/TP/TRAIL)  + LOG
 # ============================================================
 
 def step_14_exit_core_calc(cfg, state, market, logger=print):
@@ -1099,12 +1065,15 @@ def step_14_exit_core_calc(cfg, state, market, logger=print):
     if entry is None or entry <= 0:
         return False
 
+    first_calc = False
+
     # SL/TP는 포지션당 1회 계산 후 고정
     if state.get("sl_price") is None or state.get("tp_price") is None:
-        sl = entry * (1 + float(cfg["35_SL_PCT"]) / 100.0)  # SHORT: 위로 가면 손절
-        tp = entry * (1 - float(cfg["36_TP_PCT"]) / 100.0)  # SHORT: 아래로 가면 익절
+        sl = entry * (1 + float(cfg["35_SL_PCT"]) / 100.0)   # SHORT: 위로 가면 손절
+        tp = entry * (1 - float(cfg["36_TP_PCT"]) / 100.0)   # SHORT: 아래로 가면 익절
         state["sl_price"] = q(sl, 6)
         state["tp_price"] = q(tp, 6)
+        first_calc = True
 
     # TRAILING은 계속 갱신
     low = _safe_float(market.get("low"))
@@ -1121,7 +1090,7 @@ def step_14_exit_core_calc(cfg, state, market, logger=print):
     state["trailing_stop"] = q(trailing_stop, 6)
 
     # snapshot
-    state["sl_tp_trailing_records"].append({
+    snap = {
         "bar": state.get("bars"),
         "time": market.get("time"),
         "entry": entry,
@@ -1130,12 +1099,26 @@ def step_14_exit_core_calc(cfg, state, market, logger=print):
         "anchor": state.get("trailing_anchor"),
         "trailing_stop": state.get("trailing_stop"),
         "type": "EXIT_CORE_CALC",
-    })
+    }
+    state["sl_tp_trailing_records"].append(snap)
+
+    # ---------------- LOG (DEBUG ONLY)
+    if first_calc:
+        logger(
+            f"STEP14_INIT: bar={snap['bar']} "
+            f"entry={q(entry,6)} sl={snap['sl']} tp={snap['tp']}"
+        )
+
+    logger(
+        f"STEP14_TRAIL: bar={snap['bar']} "
+        f"low={low} anchor={snap['anchor']} trail={snap['trailing_stop']}"
+    )
+
     return True
 
 
 # ============================================================
-# [ STEP 15 ] EXIT JUDGE — 3 BAR CONFIRM (CLOSE)
+# [ STEP 15 ] EXIT JUDGE — 3 BAR CONFIRM (CLOSE)  + LOG
 # ============================================================
 
 def step_15_exit_judge(cfg, state, market, logger=print):
@@ -1166,23 +1149,30 @@ def step_15_exit_judge(cfg, state, market, logger=print):
 
     signal = None
 
-    # 1) SL (SHORT): close가 sl 이상이면 손절 신호
+    # 1) SL (SHORT)
     if sl is not None and price >= sl:
         signal = "SL"
 
-    # 2) TP (SHORT): close가 tp 이하이면 익절 신호
+    # 2) TP (SHORT)
     elif tp is not None and price <= tp:
         signal = "TP"
         state["tp_touched"] = True
         state["trailing_active"] = True
 
-    # 3) TRAIL (SHORT): TP 터치 이후에만 적용
+    # 3) TRAIL (SHORT)
     elif state.get("trailing_active", False):
         if tr is not None and price >= tr:
             signal = "TRAIL"
 
-    # 신호 없음: 리셋
+    # --------------------------------------------------------
+    # NO SIGNAL → RESET (LOG)
+    # --------------------------------------------------------
     if signal is None:
+        if state.get("exit_signal") is not None:
+            logger(
+                f"STEP15_RESET: bar={state.get('bars')} "
+                f"price={price} sl={sl} tp={tp} tr={tr}"
+            )
         state["exit_signal"] = None
         state["exit_confirm_count"] = 0
         state["exit_ready"] = False
@@ -1191,7 +1181,9 @@ def step_15_exit_judge(cfg, state, market, logger=print):
         state["exit_fired_signal"] = None
         return False
 
-    # 3 BAR CONFIRM
+    # --------------------------------------------------------
+    # 3 BAR CONFIRM (LOG)
+    # --------------------------------------------------------
     if state.get("exit_signal") == signal:
         state["exit_confirm_count"] = int(state.get("exit_confirm_count", 0)) + 1
     else:
@@ -1200,11 +1192,16 @@ def step_15_exit_judge(cfg, state, market, logger=print):
         state["exit_fired_bar"] = None
         state["exit_fired_signal"] = None
 
+    logger(
+        f"STEP15_CHECK: bar={state.get('bars')} "
+        f"signal={signal} count={state.get('exit_confirm_count')} "
+        f"price={price}"
+    )
+
     if int(state.get("exit_confirm_count", 0)) >= 3:
         state["exit_ready"] = True
         state["exit_reason"] = f"{signal}_3BAR_CONFIRM_CLOSE"
 
-        # 1회만 기록/락
         if state.get("exit_fired_bar") is None:
             state["exit_fired_bar"] = state.get("bars")
             state["exit_fired_signal"] = signal
@@ -1219,6 +1216,10 @@ def step_15_exit_judge(cfg, state, market, logger=print):
                 "trailing_stop": state.get("trailing_stop"),
                 "type": "EXIT_CONFIRM_3BAR",
             })
+            logger(
+                f"STEP15_CONFIRM: bar={state.get('bars')} "
+                f"signal={signal} reason={state.get('exit_reason')}"
+            )
         return True
 
     state["exit_ready"] = False
@@ -1227,12 +1228,9 @@ def step_15_exit_judge(cfg, state, market, logger=print):
 
 
 # ============================================================
-# [ STEP 16 ] REAL ORDER & POSITION STATE (SINGLE SOURCE)
-# - ENTRY OPEN / EXIT CLOSE 의 유일한 상태 전이 지점
-# - 07_ENTRY_EXEC_ENABLE=False :
-#     · 실주문 ❌
-#     · SIM_ENTRY / SIM_EXIT 로 상태·손익 갱신만 수행
-# - STEP 13은 ENTRY INTENT만 생성 (position ❌)
+# [ STEP 16 ] EXIT EXECUTION
+# - "3봉 확정 → 청산 실행 → 상태 리셋"
+# - 07_ENTRY_EXEC_ENABLE=False면 실주문 ❌, 대신 SIM_EXIT로 상태/손익 갱신은 수행
 # ============================================================
 
 # Binance enums (optional)
@@ -1243,11 +1241,9 @@ except Exception:
     SIDE_SELL = "SELL"
     ORDER_TYPE_MARKET = "MARKET"
 
-
 def order_adapter_send(symbol, side, quantity, reason, logger=print):
     logger(f"ORDER_ADAPTER_SEND: symbol={symbol} side={side} qty={quantity} reason={reason}")
-    return {"status": "FILLED", "avgPrice": None}
-
+    return True
 
 def _simulate_pnl_short(entry_price, exit_price, capital_usdt):
     ep = _safe_float(entry_price)
@@ -1255,64 +1251,28 @@ def _simulate_pnl_short(entry_price, exit_price, capital_usdt):
     cap = _safe_float(capital_usdt)
     if ep is None or xp is None or cap is None or ep <= 0 or cap <= 0:
         return 0.0
+    # 단순 비율 PnL (레버리지/수수료/수량 계산은 V8에서)
     ret = (ep - xp) / ep
     return cap * ret
 
-
 def step_16_real_order(cfg, state, market, client, logger=print):
-
+    if not state.get("exit_ready", False):
+        return False
     if state.get("order_inflight"):
         return False
     if market is None:
         return False
 
-    current_bar = int(state.get("bars", 0))
+    logger(f"STEP16_ENTER: bar={state.get('bars')} reason={state.get('exit_reason')}")
 
-    # ========================================================
-    # ENTRY OPEN (from STEP 13 pending_entry)
-    # ========================================================
-    pending = state.get("pending_entry")
-    if pending and state.get("position") is None:
-        state["order_inflight"] = True
-        try:
-            if cfg.get("07_ENTRY_EXEC_ENABLE", False):
-                result = order_adapter_send(
-                    symbol=cfg["01_TRADE_SYMBOL"],
-                    side=SIDE_SELL,  # SHORT ENTRY
-                    quantity=1,
-                    reason=pending.get("reason"),
-                    logger=logger
-                )
-                filled = result and result.get("status") == "FILLED"
-                entry_price = _safe_float(result.get("avgPrice")) or _safe_float(pending.get("price"))
-            else:
-                logger(f"SIM_ENTRY: reason={pending.get('reason')}")
-                filled = True
-                entry_price = _safe_float(pending.get("price"))
-        finally:
-            state["order_inflight"] = False
-
-        if filled and entry_price is not None:
-            state["position"] = "OPEN"
-            state["position_open_bar"] = current_bar
-            state["entry_price"] = entry_price
-            state["pending_entry"] = None
-
-        # ENTRY 실패 시 상태 변경 ❌
-        return True
-
-    # ========================================================
-    # EXIT CLOSE
-    # ========================================================
-    if not state.get("exit_ready", False):
-        return False
-
+    # ✅ EXIT 실행은 "항상" 1회 수행 (실주문 OFF라도 SIM_EXIT로 수행)
     state["order_inflight"] = True
     try:
         if cfg.get("07_ENTRY_EXEC_ENABLE", False):
+            # REAL ORDER PATH (외부 어댑터 호출)
             order_adapter_send(
                 symbol=cfg["01_TRADE_SYMBOL"],
-                side=SIDE_BUY,  # SHORT EXIT
+                side=SIDE_BUY,  # SHORT 청산 = BUY (기본)
                 quantity=1,
                 reason=state.get("exit_reason"),
                 logger=logger
@@ -1322,37 +1282,33 @@ def step_16_real_order(cfg, state, market, client, logger=print):
     finally:
         state["order_inflight"] = False
 
-    # ---- PnL / equity update ----
-    exit_price = _safe_float(market.get("close"))
-    pnl = _simulate_pnl_short(
-        state.get("entry_price"),
-        exit_price,
-        state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"])
-    )
+    # ---- PnL / equity update (record-only simulation) ----
+    exit_price = market.get("close")
+    pnl = _simulate_pnl_short(state.get("entry_price"), exit_price, state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]))
     state["realized_pnl"] = float(state.get("realized_pnl", 0.0)) + float(pnl)
     if state.get("equity") is not None:
         state["equity"] = float(state["equity"]) + float(pnl)
 
-    # ---- POSITION CLOSE (TIME AXIS RESET) ----
+    # ---- TIME AXIS reset ----
     state["position"] = None
     state["position_open_bar"] = None
-    state["last_exit_bar"] = current_bar
+    state["last_exit_bar"] = state.get("bars")
 
-    # ---- cycle reset ----
+    # cycle reset
     state["cycle_id"] = int(state.get("cycle_id", 0)) + 1
     state["entries_in_cycle"] = 0
 
-    # ---- ENTRY reset ----
+    # ENTRY reset
     state["entry_ready"] = False
     state["entry_bar"] = None
     state["entry_reason"] = None
 
-    # ---- candidate reset ----
+    # candidate reset (유령 후보 방지)
     state["has_candidate"] = False
     state["candidates"] = []
     state["last_candidate_bar"] = None
 
-    # ---- EXIT reset ----
+    # EXIT reset
     state["exit_ready"] = False
     state["exit_reason"] = None
     state["exit_signal"] = None
@@ -1360,7 +1316,7 @@ def step_16_real_order(cfg, state, market, client, logger=print):
     state["exit_fired_bar"] = None
     state["exit_fired_signal"] = None
 
-    # ---- SL / TP / TRAIL reset ----
+    # SL/TP/TRAIL reset
     state["entry_price"] = None
     state["sl_price"] = None
     state["tp_price"] = None
@@ -1368,6 +1324,8 @@ def step_16_real_order(cfg, state, market, client, logger=print):
     state["trailing_active"] = False
     state["trailing_anchor"] = None
     state["trailing_stop"] = None
+
+    logger(f"STEP16_DONE: bar={state.get('bars')} cycle_id={state.get('cycle_id')}")
 
     return True
 
@@ -1509,6 +1467,99 @@ def init_binance_client():
     return Client(api_key, api_secret)
 
 
+# ============================================================
+# LIVE DATA CONNECTION (BINANCE SPOT REST)
+# ✔️ SINGLE SOURCE: SPOT REST KLINE POLLING
+# ✔️ BR3 SUCCESS PATH
+# ✔️ BAR = kline[-2] (완료봉 ONLY)
+# ============================================================
+# ❌❌❌ 중복 정의 블록 – 기준선 위반
+# ❌❌❌ 아래 블록은 "중복 선언/중복 함수"로 인해
+# ❌❌❌ EMA 누적/캐시 초기화 사고를 유발하므로
+# ❌❌❌ **전부 주석 처리하여 봉인**
+# ============================================================
+
+# ------------------------------------------------------------
+# REST MARKET CACHE (STATE CONTRACT)   # ❌ DUPLICATE
+# ------------------------------------------------------------
+# _rest_market_cache = {
+#     "kline": None,
+#     "ema9": None,
+#     "ema9_series": [],
+#     "closes": [],
+# }
+
+# ------------------------------------------------------------
+# REST KLINE POLLING START (5m, CLOSE ONLY)   # ❌ DUPLICATE
+# ------------------------------------------------------------
+# def poll_rest_kline(symbol, logger=print):
+#     """
+#     BR3 기준:
+#     - WebSocket ❌
+#     - Futures ❌
+#     - SPOT REST ⭕
+#     - 완료봉만 사용 (kline[-2])
+#     - while 루프에서 주기적 호출
+#     """
+#
+#     try:
+#         r = requests.get(
+#             "https://api.binance.com/api/v3/klines",
+#             params={
+#                 "symbol": symbol,
+#                 "interval": KLINE_INTERVAL,
+#                 "limit": EMA9_PERIOD + 5,
+#             },
+#             timeout=5,
+#         )
+#         r.raise_for_status()
+#         kl = r.json()
+#     except Exception:
+#         return None
+#
+#     if not kl or len(kl) < EMA9_PERIOD + 2:
+#         return None
+#
+#     k = kl[-2]
+#
+#     close = _safe_float(k[4])
+#     high  = _safe_float(k[2])
+#     low   = _safe_float(k[3])
+#     open_ = _safe_float(k[1])
+#     t     = int(k[6])
+#
+#     if close is None:
+#         return None
+#
+#     series = _rest_market_cache["ema9_series"]
+#     if not series:
+#         ema = close
+#     else:
+#         kf = 2 / (EMA9_PERIOD + 1)
+#         ema = close * kf + series[-1] * (1 - kf)
+#
+#     series.append(ema)
+#     if len(series) > 50:
+#         series[:] = series[-50:]
+#
+#     closes = _rest_market_cache["closes"]
+#     closes.append(close)
+#     if len(closes) > 50:
+#         closes[:] = closes[-50:]
+#
+#     _rest_market_cache["kline"] = {
+#         "time": t,
+#         "open": open_,
+#         "high": high,
+#         "low": low,
+#         "close": close,
+#         "ema9": ema,
+#     }
+#     _rest_market_cache["ema9"] = ema
+#     _rest_market_cache["ema9_series"] = series[:]
+#
+#     logger(f"REST_KLINE_CLOSE: t={t} close={close} ema9={q(ema,6)}")
+#     return _rest_market_cache["kline"]
 
 
 # ------------------------------------------------------------
@@ -1555,6 +1606,20 @@ def app_run_live(logger=print):
     client = init_binance_client()
     state = init_state()
 
+
+    # ========================================================
+    # CSV REPLAY INIT (LOCAL TEST ONLY)
+    # --------------------------------------------------------
+    # ⚠️ 기준선 규칙:
+    # - 로컬 CSV 검증 전용
+    # - AWS / LIVE 전환 시 아래 블럭 전체 주석 처리
+    # - 종목(symbol)은 CFG에만 존재 (코드 하드코딩 금지)
+    # ========================================================
+    #csv_rows = load_sui_binance_ema9_csv("POLYX_BINANCE_EMA9.csv")
+    #csv_iter = iter(csv_rows)
+
+
+
     # ❌ WS INIT 제거 (BR3: WebSocket 사용 안 함)
     # twm = start_ws_kline(...)
 
@@ -1563,14 +1628,6 @@ def app_run_live(logger=print):
         return state
 
     logger("LIVE_START (REST POLLING MODE / BR3)")
-
-# ============================================================
-# [PATCH ONLY] VELLA V8 — LIVE LOOP ERROR FIX (BASELINE SAFE)
-# - 주인님 기준: "현재 에러 문제만" 1줄 교체
-# - 축소/삭제/재정렬 ❌
-# - STEP/로직/순서 변경 ❌
-# - 오직: 정의되지 않은 함수 호출(NameError) 제거
-# ============================================================
 
     # ========================================================
     # BTC DAILY OPEN (FUTURES API)
@@ -1609,14 +1666,43 @@ def app_run_live(logger=print):
             #     btc_daily = fetch_btc_daily_open(client)
             #     btc_daily_open = btc_daily["open"] if btc_daily else btc_daily_open
 
+
+
+            # ====================================================
+            # REPLAY MARKET — CSV ONLY (LOCAL TEST)
+            # ----------------------------------------------------
+            # - 로컬 검증 전용
+            # - AWS/LIVE에서는 이 블럭 전체 주석 처리
+            # ====================================================
+            # market = next(csv_iter, None)
+            # if market is None:
+            #     logger("CSV_REPLAY_END")
+            #     break
+            #
+            # # CSV time 정규화 (ISO8601 → ms timestamp)
+            # t = market.get("time")
+            # if isinstance(t, str):
+            #     from datetime import datetime
+            #     t = int(datetime.fromisoformat(t).timestamp() * 1000)
+            #
+            # market_core = {
+            #     "time": t,
+            #     "open": market.get("open"),
+            #     "high": market.get("high"),
+            #     "low": market.get("low"),
+            #     "close": market.get("close"),
+            #     "ema9": market.get("ema9"),
+            # }
+
+
             # ====================================================
             # LIVE MARKET — REST POLLING (SPOT /api/v3/klines)
             # - BR3 성공 경로
-            # - 완료봉(-2)만 사용
+            # - 완료봉(-2)만 사용 - csv 체크 이후 살려야 함
             # ====================================================
             market = poll_rest_kline(CFG["01_TRADE_SYMBOL"], logger=logger)
             if market is None:
-                step_41_loop_idle(CFG)
+                time.sleep(0.5)
                 continue
 
             market_core = {
@@ -1722,8 +1808,16 @@ def app_run_live(logger=print):
             if not step_9_reentry_candidate_hygiene(CFG, market_core, state, logger): continue
             if not step_10_volatility_protection(CFG, vol_ctx, state, logger): continue
 
-            # ENTRY JUDGE — FINAL (모든 게이트 통과 후 단 1회)
-            step_6_entry_judge(CFG, market_core, state, logger)
+            # ====================================================
+            # ENTRY JUDGE — FINAL
+            # ====================================================
+            entry_ok = step_6_entry_judge(CFG, market_core, state, logger)
+
+            # 🔑 핵심 수정:
+            # STEP 6에서 ENTRY 허가가 난 경우,
+            # 같은 loop 안에서 즉시 STEP 13 실행
+            if entry_ok and state.get("entry_ready", False):
+                step_13_execution_record_only(CFG, market_core, state, logger)
 
             step_11_observability(CFG, state, logger)
 
@@ -1732,27 +1826,22 @@ def app_run_live(logger=print):
                 break
 
             # ====================================================
-            # [PATCH] STEP 13 CALL — FIX NAMEERROR ONLY
-            # ----------------------------------------------------
-            # ❌ BEFORE: step_13_execution_record_only(...)  (미정의 → LIVE_ERROR)
-            # ✅ AFTER : step_13_execution_live_entry(...)   (정의됨, 기준선 STEP13)
+            # EXIT FLOW (기존 그대로)
             # ====================================================
-            step_13_execution_live_entry(CFG, market_core, state, logger)
-
             step_14_exit_core_calc(CFG, state, market_core, logger)
             step_15_exit_judge(CFG, state, market_core, logger)
             step_16_real_order(CFG, state, market_core, client, logger)
 
             state["ticks"] += 1
-            step_41_loop_idle(CFG)
+            time.sleep(1.0)  # BR3 REST POLLING INTERVAL
+
 
         except KeyboardInterrupt:
             logger("LIVE_STOP")
             break
         except Exception as e:
             logger(f"LIVE_ERROR: {e}")
-            step_41_loop_idle(CFG)
-
+            time.sleep(1.0)
 
     return state
 
