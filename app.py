@@ -1241,9 +1241,30 @@ except Exception:
     SIDE_SELL = "SELL"
     ORDER_TYPE_MARKET = "MARKET"
 
+# ✅ 실주문 어댑터 (더미 제거 / 기준선 정합)
 def order_adapter_send(symbol, side, quantity, reason, logger=print):
-    logger(f"ORDER_ADAPTER_SEND: symbol={symbol} side={side} qty={quantity} reason={reason}")
-    return True
+    try:
+        client = init_binance_client()
+
+        order = client.create_order(
+            symbol=symbol,
+            side=side,
+            type=ORDER_TYPE_MARKET,
+            quantity=quantity,
+        )
+
+        logger(
+            f"REAL_ORDER_OK: symbol={symbol} side={side} qty={quantity} "
+            f"orderId={order.get('orderId')} reason={reason}"
+        )
+        return True
+
+    except Exception as e:
+        logger(
+            f"REAL_ORDER_FAIL: symbol={symbol} side={side} qty={quantity} error={e}"
+        )
+        return False
+
 
 def _simulate_pnl_short(entry_price, exit_price, capital_usdt):
     ep = _safe_float(entry_price)
@@ -1254,6 +1275,7 @@ def _simulate_pnl_short(entry_price, exit_price, capital_usdt):
     # 단순 비율 PnL (레버리지/수수료/수량 계산은 V8에서)
     ret = (ep - xp) / ep
     return cap * ret
+
 
 def step_16_real_order(cfg, state, market, client, logger=print):
     if not state.get("exit_ready", False):
@@ -1284,7 +1306,11 @@ def step_16_real_order(cfg, state, market, client, logger=print):
 
     # ---- PnL / equity update (record-only simulation) ----
     exit_price = market.get("close")
-    pnl = _simulate_pnl_short(state.get("entry_price"), exit_price, state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]))
+    pnl = _simulate_pnl_short(
+        state.get("entry_price"),
+        exit_price,
+        state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"])
+    )
     state["realized_pnl"] = float(state.get("realized_pnl", 0.0)) + float(pnl)
     if state.get("equity") is not None:
         state["equity"] = float(state["equity"]) + float(pnl)
@@ -1698,12 +1724,24 @@ def app_run_live(logger=print):
             # ====================================================
             # LIVE MARKET — REST POLLING (SPOT /api/v3/klines)
             # - BR3 성공 경로
-            # - 완료봉(-2)만 사용 - csv 체크 이후 살려야 함
+            # - 완료봉(-2)만 사용
+            # - ✅ BAR-DRIVEN 강제 (CSV와 동일)
             # ====================================================
             market = poll_rest_kline(CFG["01_TRADE_SYMBOL"], logger=logger)
             if market is None:
                 time.sleep(0.5)
                 continue
+
+            # --- BAR CHANGE CHECK (핵심) ---
+            bar_time = market.get("time")
+            if bar_time is None or state.get("_last_bar_time") == bar_time:
+                # 같은 bar에서는 EXIT/STEP15 평가 금지
+                time.sleep(0.5)
+                continue
+
+            # 새로운 bar에서만 진행
+            state["_last_bar_time"] = bar_time
+            state["bars"] += 1
 
             market_core = {
                 "time": market.get("time"),
