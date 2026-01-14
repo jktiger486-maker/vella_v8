@@ -1678,9 +1678,11 @@ def app_run_live(logger=print):
 
 
             # ====================================================
-            # 🔥 FORCE ORDER TEST — NO CFG / NO STATE TOUCH
-            # 목적: 브8에서 실주문 함수(order_adapter_send)가
-            #       실제로 거래소까지 닿는지 10회로 증명
+            # 🔥 FORCE ORDER TEST — 30 USDT NOTIONAL
+            # 목적: 브8에서 실주문이 실제로 체결되는지 확인
+            # - CFG ❌
+            # - STATE ❌
+            # - 전략/게이트/시간축 ❌
             # ====================================================
             if not hasattr(app_run_live, "_force_order_cnt"):
                 app_run_live._force_order_cnt = 0
@@ -1689,20 +1691,28 @@ def app_run_live(logger=print):
                 n = app_run_live._force_order_cnt + 1
                 logger(f"FORCE_ORDER_TRY: {n}/10")
 
+                # 현재가 기준 30 USDT 수량 계산
+                price = market.get("close")
+                if price is None or price <= 0:
+                    logger("FORCE_ORDER_SKIP: PRICE_INVALID")
+                    continue
+
+                qty = round(30.0 / float(price), 6)
+
                 order_adapter_send(
                     symbol=CFG["01_TRADE_SYMBOL"],
-                    side=SIDE_BUY,        # SPOT 기준, 무조건 체결용
-                    quantity=1,           # 최소 수량 (증명용)
+                    side=SIDE_BUY,   # SPOT 기준 BUY
+                    quantity=qty,    # 🔥 30 USDT 기준 수량
                     reason=f"FORCE_ORDER_TEST_{n}",
                     logger=logger,
                 )
 
                 app_run_live._force_order_cnt += 1
-                time.sleep(1.0)
                 continue
 
             logger("FORCE_ORDER_DONE: EXIT ENGINE")
             return state
+
 
 
 
