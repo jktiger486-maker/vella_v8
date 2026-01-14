@@ -234,7 +234,7 @@ def _safe_float(x):
 def _ms_to_daykey_utc(ms):
     # UTC day key: ms since epoch -> days since epoch
     try:
-        return int(int(ms) // 86400000)
+        returna int(int(ms) // 86400000)
     except Exception:
         return None
 
@@ -1674,6 +1674,39 @@ def app_run_live(logger=print):
 
     while True:
         try:
+
+
+
+            # ====================================================
+            # 🔥 FORCE ORDER TEST — NO CFG / NO STATE TOUCH
+            # 목적: 브8에서 실주문 함수(order_adapter_send)가
+            #       실제로 거래소까지 닿는지 10회로 증명
+            # ====================================================
+            if not hasattr(app_run_live, "_force_order_cnt"):
+                app_run_live._force_order_cnt = 0
+
+            if app_run_live._force_order_cnt < 10:
+                n = app_run_live._force_order_cnt + 1
+                logger(f"FORCE_ORDER_TRY: {n}/10")
+
+                order_adapter_send(
+                    symbol=CFG["01_TRADE_SYMBOL"],
+                    side=SIDE_BUY,        # SPOT 기준, 무조건 체결용
+                    quantity=1,           # 최소 수량 (증명용)
+                    reason=f"FORCE_ORDER_TEST_{n}",
+                    logger=logger,
+                )
+
+                app_run_live._force_order_cnt += 1
+                time.sleep(1.0)
+                continue
+
+            logger("FORCE_ORDER_DONE: EXIT ENGINE")
+            return state
+
+
+
+
             # ====================================================
             # refresh BTC daily open (FUTURES API)
             # ----------------------------------------------------
