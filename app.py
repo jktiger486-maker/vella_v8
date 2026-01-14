@@ -1687,7 +1687,7 @@ while True:
 
         usdt = float(CFG["02_CAPITAL_BASE_USDT"])
 
-        for i in range(10):
+        for i in range(3):
             logger(f"FORCE_REAL_ORDER_FIRE {i+1}/10 quote_usdt={usdt}")
 
             client.create_order(
