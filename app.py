@@ -1673,35 +1673,27 @@ def app_run_live(logger=print):
     btc_daily_open = None
 
     #while True:
-    #    try:
+    #    try:  ((자동매매 화기인후 이 두 라인 살리고, 밑에 삭제))
 
 while True:
-    try:
-        # ============================================
-        # 🔥 FORCE REAL ORDER — SPOT MARKET / LOOP FIRE
-        # ============================================
+    market = poll_rest_kline(CFG["01_TRADE_SYMBOL"], logger)
+    if market is None:
+        continue
 
-        market = poll_rest_kline(CFG["01_TRADE_SYMBOL"], logger)
-        if market is None:
-            continue
+    usdt = float(CFG["02_CAPITAL_BASE_USDT"])
 
-        usdt = float(CFG["02_CAPITAL_BASE_USDT"])
+    logger(f"FORCE_REAL_ORDER_FIRE quote_usdt={usdt}")
 
-        for i in range(3):
-            logger(f"FORCE_REAL_ORDER_FIRE {i+1}/10 quote_usdt={usdt}")
+    client.create_order(
+        symbol=CFG["01_TRADE_SYMBOL"],
+        side="BUY",
+        type="MARKET",
+        quoteOrderQty=usdt,
+    )
 
-            client.create_order(
-                symbol=CFG["01_TRADE_SYMBOL"],
-                side="BUY",
-                type="MARKET",
-                quoteOrderQty=usdt,
-            )
+    logger("FORCE_REAL_ORDER_SENT")
+    time.sleep(5)
 
-            logger("FORCE_REAL_ORDER_SENT")
-
-    except Exception as e:
-        logger(f"LIVE_ERROR: {e}")
-        time.sleep(1)
 
 
 
