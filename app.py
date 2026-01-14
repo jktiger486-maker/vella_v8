@@ -1742,25 +1742,24 @@ def app_run_live(logger=print):
 
 
 
-            # ====================================================
-            # 🔥 FORCE REAL ORDER — FUTURES MARKET / LOOP FIRE
-            # 목적: 매매 “체결 여부”만 확인
-            # CFG 그대로 / 전략·게이트·시간축 전부 무시
-            # ====================================================
+        # ====================================================
+        # 🔥 FORCE REAL ORDER — SPOT MARKET / LOOP FIRE
+        # ====================================================
 
-            usdt = float(CFG["02_CAPITAL_BASE_USDT"])
+        usdt = float(CFG["02_CAPITAL_BASE_USDT"])
 
-            for i in range(5):   # ← 필요하면 3, 5, 10 아무거나
-                logger(f"FORCE_REAL_ORDER_FIRE {i+1}/10 quote_usdt={usdt}")
+        for i in range(3):
+            logger(f"FORCE_REAL_ORDER_FIRE {i+1}/10 quote_usdt={usdt}")
 
-                client.futures_create_order(
-                    symbol=CFG["01_TRADE_SYMBOL"],
-                    side="SELL",        # 방향 의미 없음 (체결 확인용)
-                    type="MARKET",
-                    quoteOrderQty=usdt,
-                )
+            client.create_order(
+                symbol=CFG["01_TRADE_SYMBOL"],
+                side="BUY",
+                type="MARKET",
+                quoteOrderQty=usdt,
+            )
 
-                logger("FORCE_REAL_ORDER_SENT")
+            logger("FORCE_REAL_ORDER_SENT")
+
 
 
 
