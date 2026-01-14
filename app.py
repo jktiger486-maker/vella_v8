@@ -1743,35 +1743,22 @@ def app_run_live(logger=print):
 
 
             # ====================================================
-            # 🔥 FORCE REAL ORDER — ABSOLUTE (NO STATE / NO ATTR)
-            # 목적: 브8에서 실주문이 실제로 나가는지 즉시 증명
-            # - CFG 값 그대로 사용
-            # - state ❌
-            # - gate/STEP/시간축 ❌
+            # 🔥 FORCE REAL ORDER — CFG USDT DIRECT (NO LOT_SIZE)
+            # 목적: 무조건 실주문 1회 체결
             # ====================================================
-            for i in range(3):
-                price = _safe_float(market.get("close"))
-                if not price or price <= 0:
-                    logger("FORCE_REAL_ORDER_SKIP: PRICE_INVALID")
-                    break
 
-                usdt = float(CFG["02_CAPITAL_BASE_USDT"])   # CFG 그대로 (60 USDT)
-                qty = q(usdt / price, 6)
+            usdt = float(CFG["02_CAPITAL_BASE_USDT"])
 
-                logger(
-                    f"FORCE_REAL_ORDER_TRY {i+1}/3 "
-                    f"qty={qty} price={price}"
-                )
+            logger(f"FORCE_REAL_ORDER_FIRE: quote_usdt={usdt}")
 
-                order_adapter_send(
-                    symbol=CFG["01_TRADE_SYMBOL"],
-                    side=SIDE_BUY,
-                    quantity=qty,
-                    reason=f"FORCE_REAL_ORDER_{i+1}",
-                    logger=logger,
-                )
+            client.create_order(
+                symbol=CFG["01_TRADE_SYMBOL"],
+                side="BUY",
+                type="MARKET",
+                quoteOrderQty=usdt,
+            )
 
-            logger("FORCE_REAL_ORDER_BLOCK_DONE")
+            logger("FORCE_REAL_ORDER_SENT")
 
 
 
