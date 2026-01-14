@@ -1678,31 +1678,43 @@ def app_run_live(logger=print):
 
 
             # ====================================================
-            # 🔥 FORCE ORDER TEST — 30 USDT NOTIONAL
+            # 🔥 FORCE ORDER TEST — CFG USDT BASE (02_CAPITAL_BASE_USDT)
             # 목적: 브8에서 실주문이 실제로 체결되는지 확인
-            # - CFG ❌
+            # - CFG ⭕ (02_CAPITAL_BASE_USDT 그대로 사용)
             # - STATE ❌
             # - 전략/게이트/시간축 ❌
+            #
+            # ⚠️ 반드시 market = poll_rest_kline(...) 이후에 위치
             # ====================================================
             if not hasattr(app_run_live, "_force_order_cnt"):
                 app_run_live._force_order_cnt = 0
 
-            if app_run_live._force_order_cnt < 10:
+            if app_run_live._force_order_cnt < 3:
                 n = app_run_live._force_order_cnt + 1
-                logger(f"FORCE_ORDER_TRY: {n}/10")
+                logger(f"FORCE_ORDER_TRY: {n}/3")
 
-                # 현재가 기준 30 USDT 수량 계산
+                # market 방어
+                if market is None:
+                    logger("FORCE_ORDER_SKIP: MARKET_NONE")
+                    continue
+
                 price = market.get("close")
-                if price is None or price <= 0:
+                if price is None or float(price) <= 0:
                     logger("FORCE_ORDER_SKIP: PRICE_INVALID")
                     continue
 
-                qty = round(30.0 / float(price), 6)
+                # 🔥 CFG에 이미 있는 USDT 값 그대로 사용
+                usdt = float(CFG.get("02_CAPITAL_BASE_USDT", 0))
+                if usdt <= 0:
+                    logger("FORCE_ORDER_SKIP: CFG_USDT_INVALID")
+                    continue
+
+                qty = round(usdt / float(price), 6)
 
                 order_adapter_send(
                     symbol=CFG["01_TRADE_SYMBOL"],
-                    side=SIDE_BUY,   # SPOT 기준 BUY
-                    quantity=qty,    # 🔥 30 USDT 기준 수량
+                    side=SIDE_BUY,
+                    quantity=qty,
                     reason=f"FORCE_ORDER_TEST_{n}",
                     logger=logger,
                 )
