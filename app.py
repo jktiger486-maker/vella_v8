@@ -234,7 +234,7 @@ def _safe_float(x):
 def _ms_to_daykey_utc(ms):
     # UTC day key: ms since epoch -> days since epoch
     try:
-        returna int(int(ms) // 86400000)
+        return int(int(ms) // 86400000)
     except Exception:
         return None
 
