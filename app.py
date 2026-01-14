@@ -1677,34 +1677,6 @@ def app_run_live(logger=print):
 
 
 
-            # ====================================================
-            # 🔥 FORCE ORDER TEST — BEST (CFG USDT DIRECT)
-            # 목적: 브8 자동매매 실체결 확인
-            # - CFG ⭕ (02_CAPITAL_BASE_USDT 그대로 사용)
-            # - market ❌
-            # - 봉/전략/시간축 ❌
-            # ====================================================
-            if not hasattr(app_run_live, "_force_order_cnt"):
-                app_run_live._force_order_cnt = 0
-
-            if app_run_live._force_order_cnt < 3:
-                n = app_run_live._force_order_cnt + 1
-                logger(f"FORCE_ORDER_TRY: {n}/3")
-
-                order_adapter_send(
-                    symbol=CFG["01_TRADE_SYMBOL"],
-                    side=SIDE_BUY,
-                    quote_qty=float(CFG["02_CAPITAL_BASE_USDT"]),  # 🔥 CFG 60 USDT
-                    reason=f"FORCE_ORDER_TEST_{n}",
-                    logger=logger,
-                )
-
-                app_run_live._force_order_cnt += 1
-                continue
-
-            logger("FORCE_ORDER_DONE: EXIT ENGINE")
-            return state
-
 
 
 
@@ -1767,6 +1739,43 @@ def app_run_live(logger=print):
             if market is None:
                 time.sleep(0.5)
                 continue
+
+
+
+            # ====================================================
+            # 🔥 FORCE REAL ORDER — ABSOLUTE (NO STATE / NO ATTR)
+            # 목적: 브8에서 실주문이 실제로 나가는지 즉시 증명
+            # - CFG 값 그대로 사용
+            # - state ❌
+            # - gate/STEP/시간축 ❌
+            # ====================================================
+            for i in range(3):
+                price = _safe_float(market.get("close"))
+                if not price or price <= 0:
+                    logger("FORCE_REAL_ORDER_SKIP: PRICE_INVALID")
+                    break
+
+                usdt = float(CFG["02_CAPITAL_BASE_USDT"])   # CFG 그대로 (60 USDT)
+                qty = q(usdt / price, 6)
+
+                logger(
+                    f"FORCE_REAL_ORDER_TRY {i+1}/3 "
+                    f"qty={qty} price={price}"
+                )
+
+                order_adapter_send(
+                    symbol=CFG["01_TRADE_SYMBOL"],
+                    side=SIDE_BUY,
+                    quantity=qty,
+                    reason=f"FORCE_REAL_ORDER_{i+1}",
+                    logger=logger,
+                )
+
+            logger("FORCE_REAL_ORDER_BLOCK_DONE")
+
+
+
+
 
             # --- BAR CHANGE CHECK (핵심) ---
             bar_time = market.get("time")
