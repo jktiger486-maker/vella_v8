@@ -253,6 +253,45 @@ def _ms_to_daykey_utc(ms):
 
 
 # ============================================================
+# Binance enums (FX dependency)
+# ============================================================
+try:
+    from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
+except Exception:
+    SIDE_BUY = "BUY"
+    SIDE_SELL = "SELL"
+    ORDER_TYPE_MARKET = "MARKET"
+
+
+
+
+
+# ============================================================
+# FX — BR3 REAL EXECUTION OBJECT (MINIMAL)
+# - STEP 13 전용
+# - BR3 실주문 경로
+# ============================================================
+
+class FX:
+    def __init__(self, client):
+        self.client = client
+
+    def order(self, side, qty):
+        try:
+            self.client.futures_create_order(
+                symbol=CFG["01_TRADE_SYMBOL"],
+                side=SIDE_SELL if side == "SELL" else SIDE_BUY,
+                type=ORDER_TYPE_MARKET,
+                quantity=qty,
+            )
+            return qty
+        except Exception as e:
+            print(f"FX_ORDER_ERROR: {e}")
+            return None
+
+
+
+# ============================================================
 # DATA LOADER (REPLAY)
 # ============================================================
 
@@ -1253,13 +1292,6 @@ def step_15_exit_judge(cfg, state, market, logger=print):
 # - 07_ENTRY_EXEC_ENABLE=False면 실주문 ❌, 대신 SIM_EXIT로 상태/손익 갱신은 수행
 # ============================================================
 
-# Binance enums (optional)
-try:
-    from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
-except Exception:
-    SIDE_BUY = "BUY"
-    SIDE_SELL = "SELL"
-    ORDER_TYPE_MARKET = "MARKET"
 
 def order_adapter_send(symbol, side, quantity, reason, logger=print):
     logger(f"ORDER_ADAPTER_SEND: symbol={symbol} side={side} qty={quantity} reason={reason}")
