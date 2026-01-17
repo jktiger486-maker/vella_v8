@@ -1343,12 +1343,12 @@ def step_16_real_order(cfg, state, market, client, logger=print):
     try:
         if cfg.get("07_ENTRY_EXEC_ENABLE", False):
             # REAL ORDER PATH (외부 어댑터 호출)
-            order_adapter_send(
+            client.futures_create_order(
                 symbol=cfg["01_TRADE_SYMBOL"],
-                side=SIDE_BUY,  # SHORT 청산 = BUY (기본)
+                side=SIDE_BUY,
+                type=ORDER_TYPE_MARKET,
                 quantity=state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]) / market.get("close"),
-                reason=state.get("exit_reason"),
-                logger=logger
+                reduceOnly=True
             )
         else:
             logger(f"SIM_EXIT: reason={state.get('exit_reason')}")
