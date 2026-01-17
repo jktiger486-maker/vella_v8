@@ -292,7 +292,8 @@ class FX:
         q = self._round_down(Decimal(str(qty)))
         if q < self.min_qty:
             raise RuntimeError("QTY_TOO_SMALL")
-        dec = len(format(self.step_size, "f").split(".")[1].rstrip("0"))
+        s = format(self.step_size, "f")
+        dec = len(s.split(".")[1].rstrip("0")) if "." in s else 0
         return f"{q:.{dec}f}"
 
     def order(self, side, qty):
