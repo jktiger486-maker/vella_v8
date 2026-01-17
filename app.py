@@ -267,24 +267,46 @@ except Exception:
 
 
 # ============================================================
-# FX — BR3 REAL EXECUTION OBJECT (MINIMAL)
+# FX — BR3 REAL EXECUTION OBJECT (MINIMAL + LOT_SIZE SAFE)
 # - STEP 13 전용
 # - BR3 실주문 경로
+# - ✔ LOT_SIZE / stepSize / minQty 적용
 # ============================================================
 
 class FX:
     def __init__(self, client):
         self.client = client
+        self._load_lot_rules()
+
+    def _load_lot_rules(self):
+        info = self.client.futures_exchange_info()
+        sym = next(s for s in info["symbols"] if s["symbol"] == CFG["01_TRADE_SYMBOL"])
+        lot = next(f for f in sym["filters"] if f["filterType"] == "LOT_SIZE")
+        self.step_size = Decimal(lot["stepSize"])
+        self.min_qty = Decimal(lot["minQty"])
+
+    def _round_down(self, q: Decimal) -> Decimal:
+        return (q / self.step_size).to_integral_value(rounding=ROUND_DOWN) * self.step_size
+
+    def _normalize_qty(self, qty: float) -> str:
+        q = self._round_down(Decimal(str(qty)))
+        if q < self.min_qty:
+            raise RuntimeError("QTY_TOO_SMALL")
+        dec = len(format(self.step_size, "f").split(".")[1].rstrip("0"))
+        return f"{q:.{dec}f}"
 
     def order(self, side, qty):
         try:
+            qty_str = self._normalize_qty(qty)
+
             self.client.futures_create_order(
                 symbol=CFG["01_TRADE_SYMBOL"],
                 side=SIDE_SELL if side == "SELL" else SIDE_BUY,
                 type=ORDER_TYPE_MARKET,
-                quantity=qty,
+                quantity=qty_str,
             )
-            return qty
+            return float(qty_str)
+
         except Exception as e:
             print(f"FX_ORDER_ERROR: {e}")
             return None
@@ -1323,7 +1345,7 @@ def step_16_real_order(cfg, state, market, client, logger=print):
             order_adapter_send(
                 symbol=cfg["01_TRADE_SYMBOL"],
                 side=SIDE_BUY,  # SHORT 청산 = BUY (기본)
-                quantity=1,
+                quantity=state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]) / market.get("close"),
                 reason=state.get("exit_reason"),
                 logger=logger
             )
