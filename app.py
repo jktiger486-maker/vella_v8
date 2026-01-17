@@ -1007,7 +1007,7 @@ def step_12_fail_safe(cfg, state, logger=print):
 # - ★ BR3 실주문 경로 직결 (유일한 ENTRY 주문 지점)
 # ============================================================
 
-def step_13_execution_record_only(cfg, market, state, logger=print):
+def step_13_execution_record_only(cfg, market, state, fx, logger=print):
 
     # --------------------------------------------------------
     # BASIC GUARD
@@ -1621,6 +1621,9 @@ def app_run_live(logger=print):
     client = init_binance_client()
     state = init_state()
 
+    fx = FX(client)   # ✅ BR3 실주문 객체 생성
+
+
     # ❌ WS INIT 제거 (BR3: WebSocket 사용 안 함)
     # twm = start_ws_kline(...)
 
@@ -1788,7 +1791,7 @@ def app_run_live(logger=print):
                 logger("ENGINE_STOP: STEP12_FAIL_SAFE")
                 break
 
-            step_13_execution_record_only(CFG, market_core, state, logger)
+            step_13_execution_record_only(CFG, market_core, state, fx, logger)
             step_14_exit_core_calc(CFG, state, market_core, logger)
             step_15_exit_judge(CFG, state, market_core, logger)
             step_16_real_order(CFG, state, market_core, client, logger)
