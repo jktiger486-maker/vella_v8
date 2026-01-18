@@ -1222,7 +1222,13 @@ def step_14_exit_core_calc(cfg, state, market, logger=print):
 
 
 # ============================================================
-# [ STEP 15 ] EXIT JUDGE — 3 BAR CONFIRM (CLOSE)
+# [ STEP 15 ] EXIT JUDGE — BASE/TRAIL = 3BAR AVG (CLOSE)
+# ------------------------------------------------------------
+# [FIXED CONTRACT — DO NOT TOUCH OUTSIDE THIS BLOCK]
+# - TP: 1차 수익 이벤트 (전량 EXIT 아님)
+# - BASE / TRAIL: 최근 3봉 close 평균 vs 현재가
+# - SL: 즉시 손절
+# - 연속(confirm) 개념 ❌
 # ============================================================
 
 def step_15_exit_judge(cfg, state, market, logger=print):
@@ -1251,65 +1257,50 @@ def step_15_exit_judge(cfg, state, market, logger=print):
     tp = _safe_float(state.get("tp_price"))
     tr = _safe_float(state.get("trailing_stop"))
 
-    signal = None
-
-    # 1) SL (SHORT): close가 sl 이상이면 손절 신호
+    # --------------------------------------------------------
+    # [A] SL — 즉시 손절 (SHORT)
+    # --------------------------------------------------------
     if sl is not None and price >= sl:
-        signal = "SL"
-
-    # 2) TP (SHORT): close가 tp 이하이면 익절 신호
-    elif tp is not None and price <= tp:
-        signal = "TP"
-        state["tp_touched"] = True
-        state["trailing_active"] = True
-
-    # 3) TRAIL (SHORT): TP 터치 이후에만 적용
-    elif state.get("trailing_active", False):
-        if tr is not None and price >= tr:
-            signal = "TRAIL"
-
-    # 신호 없음: 리셋
-    if signal is None:
-        state["exit_signal"] = None
-        state["exit_confirm_count"] = 0
-        state["exit_ready"] = False
-        state["exit_reason"] = None
-        state["exit_fired_bar"] = None
-        state["exit_fired_signal"] = None
-        return False
-
-    # 3 BAR CONFIRM
-    if state.get("exit_signal") == signal:
-        state["exit_confirm_count"] = int(state.get("exit_confirm_count", 0)) + 1
-    else:
-        state["exit_signal"] = signal
-        state["exit_confirm_count"] = 1
-        state["exit_fired_bar"] = None
-        state["exit_fired_signal"] = None
-
-    if int(state.get("exit_confirm_count", 0)) >= 3:
         state["exit_ready"] = True
-        state["exit_reason"] = f"{signal}_3BAR_CONFIRM_CLOSE"
-
-        # 1회만 기록/락
-        if state.get("exit_fired_bar") is None:
-            state["exit_fired_bar"] = state.get("bars")
-            state["exit_fired_signal"] = signal
-            state["exit_records"].append({
-                "bar": state.get("bars"),
-                "time": market.get("time"),
-                "close": price,
-                "signal": signal,
-                "reason": state.get("exit_reason"),
-                "sl": state.get("sl_price"),
-                "tp": state.get("tp_price"),
-                "trailing_stop": state.get("trailing_stop"),
-                "type": "EXIT_CONFIRM_3BAR",
-            })
+        state["exit_signal"] = "SL"
+        state["exit_reason"] = "SL_IMMEDIATE"
         return True
 
+    # --------------------------------------------------------
+    # [B] TP — 1차 수익 이벤트 (전량 EXIT 아님)
+    #      → trailing_active 활성만
+    # --------------------------------------------------------
+    if tp is not None and price <= tp:
+        state["tp_touched"] = True
+        state["trailing_active"] = True
+        # EXIT 아님
+        state["exit_ready"] = False
+        state["exit_signal"] = None
+        state["exit_reason"] = None
+        return False
+
+    # --------------------------------------------------------
+    # [C] BASE / TRAIL EXIT — 3봉 평균 vs 현재가
+    #      BASE: trailing_active False
+    #      TRAIL: trailing_active True
+    # --------------------------------------------------------
+    closes = _rest_market_cache.get("closes") or []
+    if len(closes) >= 3:
+        avg3 = (closes[-1] + closes[-2] + closes[-3]) / 3.0
+
+        # SHORT 기준: 현재가가 3봉 평균 위로 올라오면 EXIT
+        if price > avg3:
+            state["exit_ready"] = True
+            state["exit_signal"] = "TRAIL" if state.get("trailing_active", False) else "BASE"
+            state["exit_reason"] = "EXIT_3BAR_AVG_CLOSE"
+            return True
+
+    # --------------------------------------------------------
+    # EXIT 조건 미충족
+    # --------------------------------------------------------
     state["exit_ready"] = False
     state["exit_reason"] = None
+    state["exit_signal"] = None
     return False
 
 
