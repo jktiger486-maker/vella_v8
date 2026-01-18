@@ -1345,9 +1345,9 @@ def step_16_real_order(cfg, state, market, client, logger=print):
             # REAL ORDER PATH (외부 어댑터 호출)
             client.futures_create_order(
                 symbol=cfg["01_TRADE_SYMBOL"],
-                side=SIDE_BUY,
+                side=SIDE_BUY,                 # SHORT 청산
                 type=ORDER_TYPE_MARKET,
-                quantity=state.get("capital_usdt", cfg["02_CAPITAL_BASE_USDT"]) / market.get("close"),
+                quantity=abs(state.get("position_qty", 0.0)),
                 reduceOnly=True
             )
         else:
