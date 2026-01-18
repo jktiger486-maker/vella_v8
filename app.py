@@ -28,7 +28,7 @@ CFG = {
     # [ STEP 1 ] 거래 대상 · 자본 · 손실 한계
     # =====================================================
     "01_TRADE_SYMBOL": "POLYXUSDT",
-    "02_CAPITAL_BASE_USDT": 60,
+    "02_CAPITAL_BASE_USDT": 100,
     "03_CAPITAL_USE_FIXED": True,
     "04_CAPITAL_MAX_LOSS_PCT": 100.0,
 
@@ -58,7 +58,7 @@ CFG = {
     # =====================================================
     # [ STEP 6 ] PRICE CONFIRM
     # =====================================================
-    "12_EXECUTION_MIN_PRICE_MOVE_PCT": 0.15,
+    "12_EXECUTION_MIN_PRICE_MOVE_PCT": 0.1,
     # ▶ 후보발생 후, 기준가격 대비 최소 % 이상 하락때만 ENTRY(실행) 허용
     #    (SHORT 기준: 하락 확인 게이트 / 노이즈 차단)
     # ▶ 추천값(시작): 0.20
