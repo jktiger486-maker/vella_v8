@@ -1128,6 +1128,10 @@ def step_13_execution_record_only(cfg, market, state, fx, logger=print):
     state["position_open_bar"] = current_bar
     state["entry_price"] = price
 
+    # ✅ 추가 (이 한 줄이 핵심)
+    state["position_qty"] = qty
+
+
     # --------------------------------------------------------
     # COUNTERS / HISTORY
     # --------------------------------------------------------
