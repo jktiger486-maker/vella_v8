@@ -475,6 +475,14 @@ def step_3_generate_candidates(cfg, market, state, logger=print):
             "trigger_price": low,
             "ema9": ema9,
             "reason": "EMA9_PENETRATION",
+
+
+            # - 생성된 봉 + 다음 봉 1개까지만 ENTRY 재료
+            # - 그 이후에는 후보가 존재해도 ENTRY 불가
+            "valid_from_bar": int(state.get("bars", 0)),
+            "valid_to_bar": int(state.get("bars", 0)) + 1,
+
+
         }
         state["candidates"].append(cand)
         if cfg.get("31_LOG_CANDIDATES", True):
@@ -611,6 +619,49 @@ def step_6_entry_judge(cfg, market, state, logger=print):
         state["entry_bar"] = None
         state["entry_reason"] = "NO_CANDIDATE"
         return False
+
+
+
+
+    # ========================================================
+    # [추가] 후보 시간 계약 검사 (핵심 수정)
+    # --------------------------------------------------------
+    # ✅ 위치 고정: "후보 존재 확인" 직후, "MARKET 검사" 이전
+    # 이유:
+    # - 후보가 시간적으로 만료면, 이후 EMA/거리/CFG12/13 계산은 의미 없음
+    # - EMA 위에서 엔트리 들어오는 '유령 후보'를 구조적으로 차단
+    # ========================================================
+    last_cand = candidates[-1]           # 가장 최근 후보
+    now_bar = int(state.get("bars", 0))  # 현재 처리 중인 완료봉 bar
+
+    # STEP 3에서 정의된 계약
+    vf = last_cand.get("valid_from_bar")
+    vt = last_cand.get("valid_to_bar")
+
+    # --------------------------------------------------------
+    # 하위 호환 처리 (구버전 후보 보정)
+    # --------------------------------------------------------
+    if vf is None or vt is None:
+        cb = last_cand.get("bar")
+        if cb is None:
+            state["entry_ready"] = False
+            state["entry_bar"] = None
+            state["entry_reason"] = "CANDIDATE_INVALID"
+            return False
+
+        # 구버전 후보 보정: 생성 봉 + 다음 봉 1개까지만 허용
+        vf = int(cb)
+        vt = int(cb) + 1
+
+    # --------------------------------------------------------
+    # 시간 계약을 벗어난 후보면 ENTRY 차단
+    # --------------------------------------------------------
+    if not (int(vf) <= now_bar <= int(vt)):
+        state["entry_ready"] = False
+        state["entry_bar"] = None
+        state["entry_reason"] = "CANDIDATE_EXPIRED"
+        return False
+
 
     # ---- MARKET ----
     if market is None:
