@@ -1540,12 +1540,19 @@ def poll_rest_kline(symbol, logger=print):
         series[:] = series[-50:]
 
     # --------------------------------------------------------
-    # CLOSE BUFFER (VOLATILITY ONLY)
+    # CLOSE BUFFER (VOLATILITY / EXIT BASE — BAR ALIGNED)
     # --------------------------------------------------------
     closes = _rest_market_cache["closes"]
-    closes.append(close)
-    if len(closes) > 50:
-        closes[:] = closes[-50:]
+
+    last_kline = _rest_market_cache.get("kline")
+    last_t = last_kline.get("time") if last_kline else None
+
+    # ✅ 새로운 완료봉일 때만 append
+    if last_t != t:
+        closes.append(close)
+        if len(closes) > 50:
+            closes[:] = closes[-50:]
+
 
     # --------------------------------------------------------
     # REST MARKET CACHE (SINGLE SOURCE)
