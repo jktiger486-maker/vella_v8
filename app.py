@@ -52,13 +52,25 @@ CFG = {
     # =====================================================
     # [ STEP 5 ] EMA SLOPE
     # =====================================================
-    "10_EMA_SLOPE_MIN_PCT": -100.0,
-    "11_EMA_SLOPE_LOOKBACK_BARS": 0,
+    "10_EMA_SLOPE_MIN_PCT": -0.03,
+	# 의미: EMA9가 이 비율 이상 하락 중일 때만 ENTRY 허용
+	# SHORT 기준: 음수 = 하락 방향만 인정
+	# 효과: EMA 납작·횡보 구간 진입 차단
+	# 추천값: -0.03
+	# 추천범위: -0.02 ~ -0.05
+	# 사유: 하락 “방향성” 최소 증명용
+
+    "11_EMA_SLOPE_LOOKBACK_BARS": 3,
+	# 의미: EMA 기울기 계산에 사용할 완료봉 개수
+	# 효과: 일시적 흔들림 필터링
+	# 추천값: 3
+	# 추천범위: 2 ~ 4
+	# 사유: 5분봉 기준 안정/반응 균형
 
     # =====================================================
     # [ STEP 6 ] PRICE CONFIRM
     # =====================================================
-    "12_EXECUTION_MIN_PRICE_MOVE_PCT": 0.1,
+    "12_EXECUTION_MIN_PRICE_MOVE_PCT": 0.2,
     # ▶ 후보발생 후, 기준가격 대비 최소 % 이상 하락때만 ENTRY(실행) 허용
     #    (SHORT 기준: 하락 확인 게이트 / 노이즈 차단)
     # ▶ 추천값(시작): 0.20
@@ -1339,21 +1351,22 @@ def step_15_exit_judge(cfg, state, market, logger=print):
         state["exit_reason"] = None
         return False
 
-    # --------------------------------------------------------
-    # [C] BASE / TRAIL EXIT — 3봉 평균 vs 현재가
-    #      BASE: trailing_active False
-    #      TRAIL: trailing_active True
-    # --------------------------------------------------------
+	# --------------------------------------------------------
+	# [C] BASE / TRAIL EXIT — 2봉 평균 vs 현재가
+	#      BASE : trailing_active False
+	#      TRAIL: trailing_active True
+	# --------------------------------------------------------
     closes = _rest_market_cache.get("closes") or []
-    if len(closes) >= 3:
-        avg3 = (closes[-1] + closes[-2] + closes[-3]) / 3.0
+    if len(closes) >= 2:
+        avg2 = (closes[-1] + closes[-2]) / 2.0
 
-        # SHORT 기준: 현재가가 3봉 평균 위로 올라오면 EXIT
-        if price > avg3:
+        # SHORT 기준: 현재가가 직전 2개 완료봉 평균 위로 올라오면 EXIT
+        if price > avg2:
             state["exit_ready"] = True
             state["exit_signal"] = "TRAIL" if state.get("trailing_active", False) else "BASE"
-            state["exit_reason"] = "EXIT_3BAR_AVG_CLOSE"
+            state["exit_reason"] = "EXIT_2BAR_AVG_CLOSE"
             return True
+
 
     # --------------------------------------------------------
     # EXIT 조건 미충족
