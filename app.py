@@ -175,7 +175,7 @@ CFG = {
 
     "23_REENTRY_SAME_REASON_BLOCK": False,
 
-    "24_ENTRY_LOOKBACK_BARS": 6,
+    "24_ENTRY_LOOKBACK_BARS": 4,
 	# 의미: 진입 판단 시 "과거 몇 봉까지의 후보/조건을 참고할 수 있는가"(범위)
     # 추천 범위: 4 ~ 10
     # 권장값: 6
@@ -196,7 +196,7 @@ CFG = {
     # - 같은 자리에서 또 물기 차단
     # - 매매 빈도 급감 없이 손익 안정화
 
-    "26_CAND_POOL_TTL_BARS": 6,
+    "26_CAND_POOL_TTL_BARS": 4,
 	# 의미: 후보를 언제 버릴지 (시간)     
     # 추천 범위: 4 ~ 10
     # 권장값: 6
