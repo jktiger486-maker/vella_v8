@@ -1,5 +1,5 @@
 # ============================================================
-# VELLA V8 — app.py (AWS READY / ERROR 0)
+# VELLA V8 — app.py (AWS READY / ERROR 0)#
 # STEP 1 ~ STEP 16 (ALL PRESENT, IN ORDER)
 # ENGINE INDEPENDENT / LIVE CONTRACT
 # ------------------------------------------------------------
@@ -81,6 +81,7 @@ CFG = {
     # [ STEP 6 ] PRICE CONFIRM
     # =====================================================
     "12_EXECUTION_MIN_PRICE_MOVE_PCT": 0.0,
+    # ▶ $$$ 엔진 돌리자 말자 포지션 잡는거 막음 $$$
     # ▶ $$$ 엔진 돌리자 말자 포지션 잡는거 막음 $$$
     # ▶ 후보발생 후, 기준가격 대비 최소 % 이상 하락때만 ENTRY(실행) 허용
     #    (SHORT 기준: 하락 확인 게이트 / 노이즈 차단)
