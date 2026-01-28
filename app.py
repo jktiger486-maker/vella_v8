@@ -1,5 +1,5 @@
 # ============================================================
-# VELLA V8 — app.py (AWS READY / ERROR 0)#
+# VELLA V8 — app.py (AWS READY / ERROR 0)
 # STEP 1 ~ STEP 16 (ALL PRESENT, IN ORDER)
 # ENGINE INDEPENDENT / LIVE CONTRACT
 # ------------------------------------------------------------
@@ -27,7 +27,7 @@ CFG = {
     # =====================================================
     # [ STEP 1 ] 거래 대상 · 자본 · 손실 한계
     # =====================================================
-    "01_TRADE_SYMBOL": "POLYXUSDT",
+    "01_TRADE_SYMBOL": "RONINUSDT",
     "02_CAPITAL_BASE_USDT": 30,
     "03_CAPITAL_USE_FIXED": True,
     "04_CAPITAL_MAX_LOSS_PCT": 100.0,
@@ -43,17 +43,18 @@ CFG = {
     # [ STEP 3 ] 후보 생성
     # =====================================================
     "08_CAND_BODY_BELOW_EMA": True,
+    # EMA9 아래서 숏, 건딜지 말것.
 
     # =====================================================
     # [ STEP 4 ] BTC SESSION BIAS
     # =====================================================
     "09_BTC_SESSION_BIAS_ENABLE": False,
-    # 의미: BTC 마이너스 일때 숏 들어가라
+    # 의미: BTC 마이너스 일때 숏 들어가라    
 
     # =====================================================
     # [ STEP 5 ] EMA SLOPE
     # =====================================================
-    "10_EMA_SLOPE_MIN_PCT": 100.0,
+    "10_EMA_SLOPE_MIN_PCT": -100.0,
 	# 의미: EMA9가 이 비율 이상 하락 중일 때만 ENTRY 허용
 	# SHORT 기준: 음수 = 하락 방향만 인정
 	# 효과: EMA 납작·횡보 구간 진입 차단
@@ -61,17 +62,26 @@ CFG = {
 	# 추천범위: -0.02 ~ -0.05
 	# 사유: 하락 “방향성” 최소 증명용
 
-    "11_EMA_SLOPE_LOOKBACK_BARS": 0,
-	# 의미: EMA 기울기 계산에 사용할 완료봉 개수
-	# 효과: 일시적 흔들림 필터링
-	# 추천값: 3
-	# 추천범위: 2 ~ 4
-	# 사유: 5분봉 기준 안정/반응 균형
+    "11_EMA_SLOPE_LOOKBACK_BARS": 2,
+    # 의미: EMA 기울기를 계산할 때 참고하는 "완료봉 개수"
+    # 추천 범위: 2 ~ 3
+    # 권장값:
+    # 1 → 거의 즉시값 (노이즈 많음, 해석 불안정)
+    # 2 → 월클 표준값 (방향성 유지 + 반응성 균형) ✅
+    # 3 → 보수적 (방향성 안정 ↑, 반응 속도 ↓)
+    # 의미:
+    # - EMA 방향 판단을 몇 개 봉 평균으로 볼 것인가
+    # - 값이 클수록 노이즈 감소, 작을수록 민감
+    # 효과:
+    # - 진입/청산 판단 이유가 명확해짐
+    # - 체결 빈도에는 거의 영향 없음
+
 
     # =====================================================
     # [ STEP 6 ] PRICE CONFIRM
     # =====================================================
-    "12_EXECUTION_MIN_PRICE_MOVE_PCT": -100.0,
+    "12_EXECUTION_MIN_PRICE_MOVE_PCT": 0.0,
+    # ▶ $$$ 엔진 돌리자 말자 포지션 잡는거 막음 $$$
     # ▶ 후보발생 후, 기준가격 대비 최소 % 이상 하락때만 ENTRY(실행) 허용
     #    (SHORT 기준: 하락 확인 게이트 / 노이즈 차단)
     # ▶ 추천값(시작): 0.20
@@ -81,7 +91,16 @@ CFG = {
     #    - 0.40 ~ 0.60 : 강하게 닫기 (진입 크게 감소, 추세 구간만 남음)
     # ▶ 이유: 실제 하방 움직임이 '숫자로 증명'된 뒤에만 들어가게" 만들어
     #         이후 성과 변화가 이 게이트 효과로만 해석되게 함.
+
     "13_EXECUTION_ONLY_ON_NEW_LOW": False,
+    # 의미: 후보 발생 이후, 이전 저점보다 더 내려갔을 때만 ENTRY 허용
+    # 추천: True     
+    # 효과:
+    # - 가격이 계속 내려가야만 진입 가능
+    # - 횡보 / 되돌림 / 미끄러짐 구간 진입 전부 차단
+    # 포인트:   
+    # - CFG 12 (EXECUTION_MIN_PRICE_MOVE_PCT = 0.1) 과 궁합 최상
+    # - “실행 타이밍”만 정제, 전략 구조 영향 없음
 
     # =====================================================
     # [ STEP 6-A ] EMA PROXIMITY
@@ -92,7 +111,7 @@ CFG = {
     # =====================================================
     # [ STEP 7 ] 실행 속도 제어
     # =====================================================
-    "14_STATE_COOLDOWN_ENABLE": True,
+    "14_STATE_COOLDOWN_ENABLE": False,
     # 의미: ENTRY 후 일정 봉 수 동안 신규 ENTRY 차단
     # 효과:
     #   - 동일 환경에서 연속 숏 방지
@@ -101,14 +120,31 @@ CFG = {
     # 사유:
     #   - 월클 데이터는 “같은 환경에서 1~2번만 진입”
     #   - 연속 진입은 전략 성과가 아니라 ‘가격 흔들림’ 기록일 뿐
+
     "15_COOLDOWN_RANGE_BARS": 0,
     "16_COOLDOWN_TREND_BARS": 0,
 
     # =====================================================
     # [ STEP 8 ] 실행 안전장치
     # =====================================================
-    "17_ENTRY_MAX_PER_CYCLE": 100,
+    "17_ENTRY_MAX_PER_CYCLE": 1,
+    # 추천 범위: 1 ~ 2
+    # 권장값: 1
+    # 이유:
+    # - 한 사이클 = 최대 1회 진입
+    # - 동일 사이클 내 중복/연속 진입 차단
+    # - 포지션 추적 단순화 + 손익 왜곡 제거
+    # - “들어가면 EXIT까지” 구조 강제 (수익화 안정화 핵심)
+
     "18_MAX_ENTRIES_PER_DAY": 100,
+    # 지금은 건드리지 않음 (매매 안되는 착시/불안 방지)
+    # 추천 범위: 4 ~ 8
+    # 권장값: 6
+    # 이유:
+    # - 일일 과매매 차단
+    # - 손익 곡선 안정화
+    # - 노이즈/엔진 리스크 감소
+
     "19_DATA_STALE_BLOCK": False,
     "20_EXECUTION_SPREAD_GUARD_ENABLE": False,
     "40_EXECUTION_SPREAD_MAX_PCT": 0.50,
@@ -116,58 +152,66 @@ CFG = {
     # =====================================================
     # [ STEP 9 ] 재진입 관리
     # =====================================================
-    "21_ENTRY_COOLDOWN_BARS": 0,
+    "21_ENTRY_COOLDOWN_BARS": 1,
     # 의미: ENTRY 발생 후 강제 대기할 봉 수
     # 효과:
-    #   - 숏 난사 차단
-    #   - 한 방향 움직임을 하나의 샘플로 취급
+    #  - 숏 난사 차단
+    #  - 한 방향 움직임을 하나의 샘플로 취급
     # 추천값:
-    #   - 1 ~ 2 : 데이터 정제용 (권고)
-    #   - 0     : 실험/로그 수집용
+    #  - 1 ~ 2 : 데이터 정제용 (권고)
+    #  - 0     : 실험/로그 수집용
     # 사유:
-    #   - 5분봉 기준
-    #   - 1~2봉이면 같은 파동 중복 진입 제거에 충분
-    "22_ENTRY_COOLDOWN_AFTER_EXIT": 0,
+    #  - 5분봉 기준
+    #  - 1~2봉이면 같은 파동 중복 진입 제거에 충분
+
+    "22_ENTRY_COOLDOWN_AFTER_EXIT": 1,
+    # 추천 범위: 1 ~ 2
+    # 권장값: 1
+    # 이유:
+    # - 청산 직후 즉시 재진입(휩쏘)만 1차로 차단
+    # 10:00봉에서 EXIT/10:05봉 끝날때까지 재진입금지/10:05봉 종료후→정상엔트리 재개
+
     "23_REENTRY_SAME_REASON_BLOCK": False,
-	"24_ENTRY_LOOKBACK_BARS": 10,
-	# 의미: 재진입 판단 시 과거를 몇 봉까지 볼 것인가
-	# 기존(100): 약 8시간 → 환경 붕괴 후에도 옛 논리 재사용 ❌
-	# 수정(10): 약 50분(5분봉 기준)
-	# 효과:
-	#   - 같은 하락 파동 “근처”만 재사용
-	#   - 국면 전환 후 재진입 차단
-	# 주인님 포인트:
-	#   → "같은 환경"만 같은 데이터로 인정
 
-	"25_REENTRY_PRICE_TOL_PCT": 1.0,
-	# 의미: 재진입 허용 가격 오차(%)
-	# 기존(100): 가격 무관 재진입 = 의미 없음 ❌
-	# 수정(1.0): 거의 같은 가격대만 허용
-	# 효과:
-	#   - ‘같은 이유, 같은 위치’만 재진입
-	#   - 눌림/되돌림 구간 데이터 정제
-	# 주인님 포인트:
-	#   → 다른 가격이면 다른 샘플이다
+    "24_ENTRY_LOOKBACK_BARS": 6,
+	# 의미: 진입 판단 시 "과거 몇 봉까지의 후보/조건을 참고할 수 있는가"(범위)
+    # 추천 범위: 4 ~ 10
+    # 권장값: 6
+    # 의미:
+    # - 진입 판단을 최근 시장으로 한정
+    # - 과거 조건 끌고 오는 진입 차단
 
-	"26_CAND_POOL_TTL_BARS": 20,
-	# 의미: 후보가 살아있는 최대 봉 수
-	# 기존(1000): 며칠치 후보 생존 ❌
-	# 수정(20): 약 100분
-	# 효과:
-	#   - 후보 = “최근 시장 판단”으로 한정
-	#   - 환경 바뀌면 후보 자동 소멸
-	# 주인님 포인트:
-	#   → 후보는 기억이 아니라 순간 판단이다
+    "25_REENTRY_PRICE_TOL_PCT": 0.2,
+	# 의미: 이전 진입가보다 최소 0.6% 이상 “유리한 가격”이 나와야 재진입 허용
+    # 추천 범위: 0.3 ~ 1.0
+    # 권장값: 
+    # 0.1 → 거의 자유 재진입 (과매매 위험)
+    # 0.2 → 가벼운 필터 (재진입은 하되, 같은 자리 물림은 어느 정도 컷)
+    # 0.3 → 월클 중립값 (의미 있는 재진입만)
+    # 0.6 → 보수적 (파동 추가 확인)
+    # 의미:
+    # - 재진입 시 이전 진입가 대비 허용 가격 오차(%)
+    # - 같은 자리에서 또 물기 차단
+    # - 매매 빈도 급감 없이 손익 안정화
 
-	"27_CAND_POOL_MAX_SIZE": 20,
-	# 의미: 동시에 보관 가능한 후보 수
-	# 기존(1000): 로그 수집용 설정 ❌
-	# 수정(20): 실제 하락 파동에서 발생 가능한 현실적 최대치
-	# 효과:
-	#   - 후보 폭주 방지
-	#   - 데이터 해석 단순화
-	# 주인님 포인트:
-	#   → 많으면 좋다는 건 연구자 사고, 월클은 다르다
+    "26_CAND_POOL_TTL_BARS": 6,
+	# 의미: 후보를 언제 버릴지 (시간)     
+    # 추천 범위: 4 ~ 10
+    # 권장값: 6
+    # 의미: 후보를 얼마나 오래 “보관”하느냐
+    # - 후보를 최근 시장(약 30분) 기준으로만 유지
+    # - 과거 후보 재사용(유령 진입) 제거
+    # - 매매 빈도는 유지, 진입 해석만 명확화
+
+    "27_CAND_POOL_MAX_SIZE": 10,
+	# 의미: 후보를 몇 개까지 들고 있을지 (개수), 5분봉 안에 후보1개가 아니다.
+    # 추천 범위: 5 ~ 20
+    # 권장값: 10
+    # 의미:
+    # - 후보 풀 최대 개수 제한
+    # - 최근 후보만 유지 (상태 비대화/꼬임 방지)
+    # - 매매 빈도 영향 거의 없음
+
     "28_CAND_MIN_GAP_BARS": 0,
 
     # =====================================================
@@ -452,23 +496,25 @@ def step_1_engine_limit(cfg, state, capital_ctx=None, logger=print):
     if not isinstance(max_loss_pct, (int, float)) or float(max_loss_pct) < 0:
         raise RuntimeError("STEP1_INVALID_CAPITAL_MAX_LOSS_PCT")
 
-    # CAPITAL USE (fixed / dynamic)
-    capital_usdt = float(base)
-    if not cfg["03_CAPITAL_USE_FIXED"]:
-        # dynamic capital (live only): capital_ctx["available_usdt"] if provided
-        if capital_ctx and isinstance(capital_ctx.get("available_usdt"), (int, float)):
-            capital_usdt = max(0.0, float(capital_ctx["available_usdt"]))
-
-    state["capital_usdt"] = capital_usdt
-
-    # 최초 1회: equity 초기화
+    # =====================================================
+    # 🔒 STEP1 INIT — 최초 1회만 실행 (TIME AXIS CONTRACT)
+    # =====================================================
     if state.get("initial_equity") is None:
+        # CAPITAL USE (fixed / dynamic)
+        capital_usdt = float(base)
+        if not cfg["03_CAPITAL_USE_FIXED"]:
+            if capital_ctx and isinstance(capital_ctx.get("available_usdt"), (int, float)):
+                capital_usdt = max(0.0, float(capital_ctx["available_usdt"]))
+
+        state["capital_usdt"] = capital_usdt
         state["initial_equity"] = capital_usdt
         state["equity"] = capital_usdt
         state["realized_pnl"] = 0.0
 
-    logger("STEP1_PASS")
+        logger("STEP1_PASS")  # ✅ 최초 1회만 출력
+
     return True
+
 
 
 # ============================================================
@@ -541,14 +587,6 @@ def step_3_generate_candidates(cfg, market, state, logger=print):
             "trigger_price": low,
             "ema9": ema9,
             "reason": "EMA9_PENETRATION",
-
-
-            # - 생성된 봉 + 다음 봉 1개까지만 ENTRY 재료
-            # - 그 이후에는 후보가 존재해도 ENTRY 불가
-            "valid_from_bar": int(state.get("bars", 0)),
-            "valid_to_bar": int(state.get("bars", 0)) + 1,
-
-
         }
         state["candidates"].append(cand)
         if cfg.get("31_LOG_CANDIDATES", True):
@@ -685,49 +723,6 @@ def step_6_entry_judge(cfg, market, state, logger=print):
         state["entry_bar"] = None
         state["entry_reason"] = "NO_CANDIDATE"
         return False
-
-
-
-
-    # ========================================================
-    # [추가] 후보 시간 계약 검사 (핵심 수정)
-    # --------------------------------------------------------
-    # ✅ 위치 고정: "후보 존재 확인" 직후, "MARKET 검사" 이전
-    # 이유:
-    # - 후보가 시간적으로 만료면, 이후 EMA/거리/CFG12/13 계산은 의미 없음
-    # - EMA 위에서 엔트리 들어오는 '유령 후보'를 구조적으로 차단
-    # ========================================================
-    last_cand = candidates[-1]           # 가장 최근 후보
-    now_bar = int(state.get("bars", 0))  # 현재 처리 중인 완료봉 bar
-
-    # STEP 3에서 정의된 계약
-    vf = last_cand.get("valid_from_bar")
-    vt = last_cand.get("valid_to_bar")
-
-    # --------------------------------------------------------
-    # 하위 호환 처리 (구버전 후보 보정)
-    # --------------------------------------------------------
-    if vf is None or vt is None:
-        cb = last_cand.get("bar")
-        if cb is None:
-            state["entry_ready"] = False
-            state["entry_bar"] = None
-            state["entry_reason"] = "CANDIDATE_INVALID"
-            return False
-
-        # 구버전 후보 보정: 생성 봉 + 다음 봉 1개까지만 허용
-        vf = int(cb)
-        vt = int(cb) + 1
-
-    # --------------------------------------------------------
-    # 시간 계약을 벗어난 후보면 ENTRY 차단
-    # --------------------------------------------------------
-    if not (int(vf) <= now_bar <= int(vt)):
-        state["entry_ready"] = False
-        state["entry_bar"] = None
-        state["entry_reason"] = "CANDIDATE_EXPIRED"
-        return False
-
 
     # ---- MARKET ----
     if market is None:
@@ -1405,22 +1400,23 @@ def step_15_exit_judge(cfg, state, market, logger=print):
         state["exit_reason"] = None
         return False
 
-	# --------------------------------------------------------
-	# [C] BASE / TRAIL EXIT — 2봉 평균 vs 현재가
-	#      BASE : trailing_active False
-	#      TRAIL: trailing_active True
-	# --------------------------------------------------------
+    # --------------------------------------------------------
+    # [C] BASE / TRAIL EXIT — 2봉 평균 vs 현재가
+    #      BASE: trailing_active False
+    #      TRAIL: trailing_active True
+    # --------------------------------------------------------
     closes = _rest_market_cache.get("closes") or []
     if len(closes) >= 2:
         avg2 = (closes[-1] + closes[-2]) / 2.0
 
-        # SHORT 기준: 현재가가 직전 2개 완료봉 평균 위로 올라오면 EXIT
+        # SHORT 기준: 현재가가 2봉 평균 위로 올라오면 EXIT
         if price > avg2:
             state["exit_ready"] = True
-            state["exit_signal"] = "TRAIL" if state.get("trailing_active", False) else "BASE"
+            state["exit_signal"] = (
+                "TRAIL" if state.get("trailing_active", False) else "BASE"
+            )
             state["exit_reason"] = "EXIT_2BAR_AVG_CLOSE"
             return True
-
 
     # --------------------------------------------------------
     # EXIT 조건 미충족
@@ -1607,19 +1603,12 @@ def poll_rest_kline(symbol, logger=print):
         series[:] = series[-50:]
 
     # --------------------------------------------------------
-    # CLOSE BUFFER (VOLATILITY / EXIT BASE — BAR ALIGNED)
+    # CLOSE BUFFER (VOLATILITY ONLY)
     # --------------------------------------------------------
     closes = _rest_market_cache["closes"]
-
-    last_kline = _rest_market_cache.get("kline")
-    last_t = last_kline.get("time") if last_kline else None
-
-    # ✅ 새로운 완료봉일 때만 append
-    if last_t != t:
-        closes.append(close)
-        if len(closes) > 50:
-            closes[:] = closes[-50:]
-
+    closes.append(close)
+    if len(closes) > 50:
+        closes[:] = closes[-50:]
 
     # --------------------------------------------------------
     # REST MARKET CACHE (SINGLE SOURCE)
