@@ -94,7 +94,7 @@ CFG = {
     # ▶ 이유: 실제 하방 움직임이 '숫자로 증명'된 뒤에만 들어가게" 만들어
     #         이후 성과 변화가 이 게이트 효과로만 해석되게 함.
 
-    "13_EXECUTION_ONLY_ON_NEW_LOW": True,
+    "13_EXECUTION_ONLY_ON_NEW_LOW": False,
     # 의미: 후보 발생 이후, 이전 저점보다 더 내려갔을 때만 ENTRY 허용
     # 추천: True     
     # 효과:
