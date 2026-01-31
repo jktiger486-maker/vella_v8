@@ -1,5 +1,9 @@
 # ============================================================
-# VELLA V8 — app_min.py (PROFIT CUT / AWS READY / TRAILING FIX)
+# VELLA V8 — app_min.py (PROFIT CUT / AWS READY / TRAILING FIX v2)
+# 핵심 수정:
+# 1) REST series/closes 중복 append 제거 (새 완료봉에서만)
+# 2) EXIT 우선순위: SL > TRAIL_STOP > BASE
+# 3) ENTRY: 후보봉 다음 봉에서만 진입 (즉시 진입 제거)
 # ============================================================
 
 import os, time, requests
@@ -114,6 +118,7 @@ EMA9_PERIOD=9
 KLINE_INTERVAL="5m"
 
 _rest = {
+    "last_time": None,        # ✅ 새 완료봉 체크
     "ema9_series": [],
     "closes": []
 }
@@ -129,7 +134,7 @@ def fetch_klines(symbol, interval, limit=100):
 
 def poll_rest_kline(symbol, logger=print):
     kl = fetch_klines(symbol, KLINE_INTERVAL, limit=EMA9_PERIOD+5)
-    k = kl[-2]
+    k = kl[-2]  # 완료봉
 
     t = int(k[6])
     o = float(k[1])
@@ -137,13 +142,21 @@ def poll_rest_kline(symbol, logger=print):
     l = float(k[3])
     c = float(k[4])
 
-    series = _rest["ema9_series"]
-    ema = c if not series else (c*(2/(EMA9_PERIOD+1)) + series[-1]*(1-2/(EMA9_PERIOD+1)))
-    series.append(ema)
-    series[:] = series[-50:]
+    # ✅ 같은 완료봉이면 series/closes를 다시 append 하지 않는다
+    if _rest["last_time"] != t:
+        series = _rest["ema9_series"]
+        ema = c if not series else (c*(2/(EMA9_PERIOD+1)) + series[-1]*(1-2/(EMA9_PERIOD+1)))
+        series.append(ema)
+        series[:] = series[-50:]
 
-    _rest["closes"].append(c)
-    _rest["closes"] = _rest["closes"][-50:]
+        _rest["closes"].append(c)
+        _rest["closes"] = _rest["closes"][-50:]
+
+        _rest["last_time"] = t
+    else:
+        # 같은 완료봉: 마지막 값을 그대로 사용
+        series = _rest["ema9_series"]
+        ema = series[-1] if series else c
 
     logger(f"REST_CLOSE t={t} close={c} ema9={q(ema)}")
     return {"time":t,"open":o,"high":h,"low":l,"close":c,"ema9":ema}
@@ -159,19 +172,30 @@ def step_1(cfg, state):
 def step_3(cfg, mkt, state, logger):
     if not cfg["06_ENTRY_CANDIDATE_ENABLE"]:
         return
+    # 후보 조건(최소): low < ema9 (원형 유지)
     if mkt["low"] < mkt["ema9"] and state["last_candidate_bar"] != state["bars"]:
         state["has_candidate"]=True
         state["last_candidate_bar"]=state["bars"]
         state["candidates"]=[{"bar":state["bars"],"price":mkt["low"]}]
-        logger(f"CANDIDATE bar={state['bars']}")
+        if cfg["31_LOG_CANDIDATES"]:
+            logger(f"CANDIDATE bar={state['bars']}")
 
 def step_6_entry_judge(state):
+    # ✅ 즉시 진입 제거: 후보가 생긴 '다음 bar'에서만 entry_ready
     if state["position"] is not None:
         return
     if not state["has_candidate"]:
         return
-    state["entry_ready"]=True
-    state["entry_bar"]=state["bars"]
+    if state["last_candidate_bar"] is None:
+        return
+
+    want_entry_bar = state["last_candidate_bar"] + 1
+    if state["bars"] != want_entry_bar:
+        return
+
+    if not state["entry_ready"]:
+        state["entry_ready"]=True
+        state["entry_bar"]=state["bars"]
 
 def step_13_entry(cfg, mkt, state, fx, logger):
     if not state["entry_ready"]:
@@ -192,7 +216,13 @@ def step_13_entry(cfg, mkt, state, fx, logger):
     state["position_qty"]=qty
     state["entry_ready"]=False
 
-    logger(f"ENTRY bar={state['bars']} price={price} qty={qty}")
+    # ✅ 후보 소진 (연속 즉시 재진입 방지)
+    state["has_candidate"]=False
+    state["candidates"]=[]
+    state["last_candidate_bar"]=None
+
+    if cfg["32_LOG_EXECUTIONS"]:
+        logger(f"ENTRY bar={state['bars']} price={price} qty={qty}")
 
 def step_14_exit_calc(cfg, state, mkt):
     if state["position"]!="OPEN":
@@ -219,27 +249,32 @@ def step_15_exit_judge(state, mkt):
 
     price=mkt["close"]
 
-    # REAL TRAILING STOP
-    if state["trailing_active"] and price >= state["trailing_stop"]:
-        state["exit_ready"]=True
-        state["exit_reason"]="TRAIL_STOP"
-        return True
+    # ✅ EXIT 우선순위 정답: SL > TRAIL_STOP > BASE
 
+    # 1) SL (short stoploss)
     if price >= state["sl_price"]:
         state["exit_ready"]=True
         state["exit_reason"]="SL"
         return True
 
-    if price <= state["tp_price"]:
+    # 2) TP 도달 → trailing 활성
+    if (not state["tp_touched"]) and price <= state["tp_price"]:
         state["tp_touched"]=True
         state["trailing_active"]=True
 
+    # 3) TRAIL_STOP (TP 이후에만 의미)
+    if state["trailing_active"] and price >= state["trailing_stop"]:
+        state["exit_ready"]=True
+        state["exit_reason"]="TRAIL_STOP"
+        return True
+
+    # 4) BASE EXIT (avg2 rebound)
     closes=_rest["closes"]
     if len(closes)>=2:
         avg2=(closes[-1]+closes[-2])/2
-        if price>avg2:
+        if price > avg2:
             state["exit_ready"]=True
-            state["exit_reason"]="TRAIL" if state["trailing_active"] else "BASE"
+            state["exit_reason"]="BASE"
             return True
 
     return False
@@ -265,7 +300,7 @@ def step_16_exit_exec(cfg, state, mkt, client, logger):
 
     logger(f"EXIT {state['exit_reason']} pnl={q(pnl,4)} eq={q(state['equity'],4)}")
 
-    # FULL RESET
+    # RESET
     state.update({
         "has_candidate": False,
         "candidates": [],
@@ -297,6 +332,7 @@ def app_run_live(logger=print):
     while True:
         mkt=poll_rest_kline(CFG["01_TRADE_SYMBOL"], logger)
 
+        # ✅ 새 완료봉에서만 bars 증가
         if state["_last_bar_time"]!=mkt["time"]:
             state["_last_bar_time"]=mkt["time"]
             state["bars"]+=1
