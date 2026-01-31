@@ -1,9 +1,5 @@
 # ============================================================
-# VELLA V8 — app_min.py (PROFIT CUT / AWS READY / TRAILING FIX v2)
-# 핵심 수정:
-# 1) REST series/closes 중복 append 제거 (새 완료봉에서만)
-# 2) EXIT 우선순위: SL > TRAIL_STOP > BASE
-# 3) ENTRY: 후보봉 다음 봉에서만 진입 (즉시 진입 제거)
+# VELLA V8 — app_min.py (PROFIT CUT / AWS READY / TP PARTIAL)
 # ============================================================
 
 import os, time, requests
@@ -24,8 +20,9 @@ CFG = {
     "32_LOG_EXECUTIONS": True,
 
     "35_SL_PCT": 0.60,
-    "36_TP_PCT": 0.70,
-    "37_TRAILING_PCT": 0.30,
+    "36_TP_PCT": 0.70,          # TP 진입 트리거
+    "37_TRAILING_PCT": 0.30,    # 트레일링 거리
+    "38_TP_PARTIAL_PCT": 0.5,   # ✅ TP 부분익절 비율 (50%)
 }
 
 # ---------------- STATE ----------------
@@ -35,7 +32,6 @@ def init_state():
         "_last_bar_time": None,
 
         "has_candidate": False,
-        "candidates": [],
         "last_candidate_bar": None,
 
         "entry_ready": False,
@@ -44,6 +40,7 @@ def init_state():
         "position": None,
         "position_open_bar": None,
         "position_qty": None,
+        "remain_qty": None,
 
         "capital_usdt": None,
         "initial_equity": None,
@@ -55,6 +52,8 @@ def init_state():
         "tp_price": None,
 
         "tp_touched": False,
+        "tp_partial_done": False,
+
         "trailing_active": False,
         "trailing_anchor": None,
         "trailing_stop": None,
@@ -98,30 +97,29 @@ class FX:
     def _norm(self, qty):
         qd = (Decimal(str(qty)) / self.step).to_integral_value(rounding=ROUND_DOWN) * self.step
         if qd < self.minq:
-            raise RuntimeError("QTY_TOO_SMALL")
+            return None
         d = len(str(self.step).split(".")[1].rstrip("0"))
         return f"{qd:.{d}f}"
 
-    def order(self, side, qty):
+    def order(self, side, qty, reduce=False):
         qs = self._norm(qty)
+        if qs is None:
+            return 0.0
         self.client.futures_create_order(
             symbol=CFG["01_TRADE_SYMBOL"],
             side=SIDE_SELL if side=="SELL" else SIDE_BUY,
             type=ORDER_TYPE_MARKET,
-            quantity=qs
+            quantity=qs,
+            reduceOnly=reduce
         )
         return float(qs)
 
-# ---------------- MARKET (REST) ----------------
+# ---------------- MARKET ----------------
 BINANCE_SPOT="https://api.binance.com/api/v3/klines"
 EMA9_PERIOD=9
 KLINE_INTERVAL="5m"
 
-_rest = {
-    "last_time": None,        # ✅ 새 완료봉 체크
-    "ema9_series": [],
-    "closes": []
-}
+_rest = {"ema9_series": [], "closes": []}
 
 def fetch_klines(symbol, interval, limit=100):
     r = requests.get(
@@ -134,7 +132,7 @@ def fetch_klines(symbol, interval, limit=100):
 
 def poll_rest_kline(symbol, logger=print):
     kl = fetch_klines(symbol, KLINE_INTERVAL, limit=EMA9_PERIOD+5)
-    k = kl[-2]  # 완료봉
+    k = kl[-2]
 
     t = int(k[6])
     o = float(k[1])
@@ -142,23 +140,13 @@ def poll_rest_kline(symbol, logger=print):
     l = float(k[3])
     c = float(k[4])
 
-    # ✅ 같은 완료봉이면 series/closes를 다시 append 하지 않는다
-    if _rest["last_time"] != t:
-        series = _rest["ema9_series"]
-        ema = c if not series else (c*(2/(EMA9_PERIOD+1)) + series[-1]*(1-2/(EMA9_PERIOD+1)))
-        series.append(ema)
-        series[:] = series[-50:]
+    series = _rest["ema9_series"]
+    ema = c if not series else (c*(2/(EMA9_PERIOD+1)) + series[-1]*(1-2/(EMA9_PERIOD+1)))
+    series.append(ema); series[:] = series[-50:]
 
-        _rest["closes"].append(c)
-        _rest["closes"] = _rest["closes"][-50:]
+    _rest["closes"].append(c); _rest["closes"] = _rest["closes"][-50:]
 
-        _rest["last_time"] = t
-    else:
-        # 같은 완료봉: 마지막 값을 그대로 사용
-        series = _rest["ema9_series"]
-        ema = series[-1] if series else c
-
-    logger(f"REST_CLOSE t={t} close={c} ema9={q(ema)}")
+    logger(f"REST t={t} close={c} ema9={q(ema)}")
     return {"time":t,"open":o,"high":h,"low":l,"close":c,"ema9":ema}
 
 # ---------------- STEPS ----------------
@@ -172,154 +160,95 @@ def step_1(cfg, state):
 def step_3(cfg, mkt, state, logger):
     if not cfg["06_ENTRY_CANDIDATE_ENABLE"]:
         return
-    # 후보 조건(최소): low < ema9 (원형 유지)
     if mkt["low"] < mkt["ema9"] and state["last_candidate_bar"] != state["bars"]:
         state["has_candidate"]=True
         state["last_candidate_bar"]=state["bars"]
-        state["candidates"]=[{"bar":state["bars"],"price":mkt["low"]}]
-        if cfg["31_LOG_CANDIDATES"]:
-            logger(f"CANDIDATE bar={state['bars']}")
+        logger(f"CANDIDATE bar={state['bars']}")
 
 def step_6_entry_judge(state):
-    # ✅ 즉시 진입 제거: 후보가 생긴 '다음 bar'에서만 entry_ready
-    if state["position"] is not None:
-        return
-    if not state["has_candidate"]:
-        return
-    if state["last_candidate_bar"] is None:
-        return
-
-    want_entry_bar = state["last_candidate_bar"] + 1
-    if state["bars"] != want_entry_bar:
-        return
-
-    if not state["entry_ready"]:
+    if state["position"] is None and state["has_candidate"]:
         state["entry_ready"]=True
         state["entry_bar"]=state["bars"]
 
 def step_13_entry(cfg, mkt, state, fx, logger):
-    if not state["entry_ready"]:
+    if not state["entry_ready"] or state["bars"]!=state["entry_bar"]:
         return
-    if state["bars"] != state["entry_bar"]:
-        state["entry_ready"]=False
-        return
-
-    price = mkt["close"]
-    qty = fx.order(
-        "SELL",
-        (state["capital_usdt"] * 0.95) / price
-    ) if cfg["07_ENTRY_EXEC_ENABLE"] else 1.0
-
-    state["position"]="OPEN"
-    state["position_open_bar"]=state["bars"]
-    state["entry_price"]=price
-    state["position_qty"]=qty
-    state["entry_ready"]=False
-
-    # ✅ 후보 소진 (연속 즉시 재진입 방지)
-    state["has_candidate"]=False
-    state["candidates"]=[]
-    state["last_candidate_bar"]=None
-
-    if cfg["32_LOG_EXECUTIONS"]:
-        logger(f"ENTRY bar={state['bars']} price={price} qty={qty}")
+    price=mkt["close"]
+    qty=fx.order("SELL",(state["capital_usdt"]*0.95)/price)
+    state.update({
+        "position":"OPEN",
+        "position_open_bar":state["bars"],
+        "entry_price":price,
+        "position_qty":qty,
+        "remain_qty":qty,
+        "entry_ready":False
+    })
+    logger(f"ENTRY price={price} qty={qty}")
 
 def step_14_exit_calc(cfg, state, mkt):
     if state["position"]!="OPEN":
         return
-
-    e = state["entry_price"]
-
+    e=state["entry_price"]
     if state["sl_price"] is None:
         state["sl_price"]=q(e*(1+cfg["35_SL_PCT"]/100))
         state["tp_price"]=q(e*(1-cfg["36_TP_PCT"]/100))
 
-    low = mkt["low"]
-    anchor = state["trailing_anchor"] if state["trailing_anchor"] is not None else e
-    anchor = min(anchor, low)
-
+    low=mkt["low"]
+    anchor=state["trailing_anchor"] if state["trailing_anchor"] else e
+    anchor=min(anchor,low)
     state["trailing_anchor"]=q(anchor)
     state["trailing_stop"]=q(anchor*(1+cfg["37_TRAILING_PCT"]/100))
 
-def step_15_exit_judge(state, mkt):
-    if state["position"]!="OPEN":
-        return False
-    if state["bars"]<=state["position_open_bar"]:
-        return False
+def step_15_exit_judge(cfg, state, mkt, fx, logger):
+    if state["position"]!="OPEN" or state["bars"]<=state["position_open_bar"]:
+        return
 
     price=mkt["close"]
 
-    # ✅ EXIT 우선순위 정답: SL > TRAIL_STOP > BASE
-
-    # 1) SL (short stoploss)
-    if price >= state["sl_price"]:
+    # 1️⃣ HARD SL
+    if price>=state["sl_price"]:
         state["exit_ready"]=True
         state["exit_reason"]="SL"
-        return True
+        return
 
-    # 2) TP 도달 → trailing 활성
-    if (not state["tp_touched"]) and price <= state["tp_price"]:
+    # 2️⃣ TP PARTIAL
+    if (not state["tp_partial_done"]) and price<=state["tp_price"]:
+        part_qty=state["remain_qty"]*cfg["38_TP_PARTIAL_PCT"]
+        closed=fx.order("BUY",part_qty,reduce=True)
+        state["remain_qty"]-=closed
+        state["tp_partial_done"]=True
         state["tp_touched"]=True
         state["trailing_active"]=True
+        logger(f"TP_PARTIAL qty={closed}")
 
-    # 3) TRAIL_STOP (TP 이후에만 의미)
-    if state["trailing_active"] and price >= state["trailing_stop"]:
+    # 3️⃣ TRAILING STOP
+    if state["trailing_active"] and price>=state["trailing_stop"]:
         state["exit_ready"]=True
         state["exit_reason"]="TRAIL_STOP"
-        return True
+        return
 
-    # 4) BASE EXIT (avg2 rebound)
+    # 4️⃣ BASIC EXIT
     closes=_rest["closes"]
     if len(closes)>=2:
         avg2=(closes[-1]+closes[-2])/2
-        if price > avg2:
+        if price>avg2:
             state["exit_ready"]=True
             state["exit_reason"]="BASE"
-            return True
 
-    return False
-
-def step_16_exit_exec(cfg, state, mkt, client, logger):
+def step_16_exit_exec(state, mkt, fx, logger):
     if not state["exit_ready"]:
         return
-
-    if cfg["07_ENTRY_EXEC_ENABLE"]:
-        client.futures_create_order(
-            symbol=CFG["01_TRADE_SYMBOL"],
-            side=SIDE_BUY,
-            type=ORDER_TYPE_MARKET,
-            quantity=abs(state["position_qty"]),
-            reduceOnly=True
-        )
+    if state["remain_qty"]>0:
+        fx.order("BUY",state["remain_qty"],reduce=True)
 
     exit_price=mkt["close"]
     pnl=(state["entry_price"]-exit_price)/state["entry_price"]*state["capital_usdt"]
-
     state["equity"]+=pnl
     state["realized_pnl"]+=pnl
 
     logger(f"EXIT {state['exit_reason']} pnl={q(pnl,4)} eq={q(state['equity'],4)}")
-
-    # RESET
-    state.update({
-        "has_candidate": False,
-        "candidates": [],
-        "last_candidate_bar": None,
-        "entry_ready": False,
-        "entry_bar": None,
-        "position": None,
-        "position_open_bar": None,
-        "position_qty": None,
-        "entry_price": None,
-        "sl_price": None,
-        "tp_price": None,
-        "tp_touched": False,
-        "trailing_active": False,
-        "trailing_anchor": None,
-        "trailing_stop": None,
-        "exit_ready": False,
-        "exit_reason": None,
-    })
+    state.clear()
+    state.update(init_state())
 
 # ---------------- RUN ----------------
 def app_run_live(logger=print):
@@ -327,23 +256,21 @@ def app_run_live(logger=print):
     fx=FX(client)
     state=init_state()
 
-    logger("LIVE_START MIN")
+    logger("LIVE_START")
 
     while True:
         mkt=poll_rest_kline(CFG["01_TRADE_SYMBOL"], logger)
-
-        # ✅ 새 완료봉에서만 bars 증가
         if state["_last_bar_time"]!=mkt["time"]:
             state["_last_bar_time"]=mkt["time"]
             state["bars"]+=1
 
-        step_1(CFG, state)
-        step_3(CFG, mkt, state, logger)
+        step_1(CFG,state)
+        step_3(CFG,mkt,state,logger)
         step_6_entry_judge(state)
-        step_13_entry(CFG, mkt, state, fx, logger)
-        step_14_exit_calc(CFG, state, mkt)
-        step_15_exit_judge(state, mkt)
-        step_16_exit_exec(CFG, state, mkt, client, logger)
+        step_13_entry(CFG,mkt,state,fx,logger)
+        step_14_exit_calc(CFG,state,mkt)
+        step_15_exit_judge(CFG,state,mkt,fx,logger)
+        step_16_exit_exec(state,mkt,fx,logger)
 
         time.sleep(5)
 
