@@ -19,13 +19,15 @@ import os
 import time
 import requests
 from decimal import Decimal, ROUND_DOWN
+from binance.client import Client
+from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
 
 # ============================================================
 # CFG
 # ============================================================
 CFG = {
     # --------------------------------------------------------
-    # [01~09] BASIC
+    # [01~04] BASIC
     # --------------------------------------------------------
     "01_TRADE_SYMBOL": "RONINUSDT",
     "02_CAPITAL_BASE_USDT": 30,
@@ -33,23 +35,39 @@ CFG = {
     "04_ENGINE_ENABLE": True,
 
     # --------------------------------------------------------
+    # [05~14] ENTRY / GATE (EXPANDABLE)
+    # --------------------------------------------------------
+    "05_EXECUTION_MIN_PRICE_MOVE_PCT": 0.10,  # 후보 대비 최소 하락 %
+    # ▶ $$$ 엔진 돌리자 말자 포지션 잡는거 막음 $$$
+    # ▶ 후보발생 후, 기준가격 대비 최소 % 이상 하락때만 ENTRY(실행) 허용
+    #    (SHORT 기준: 하락 확인 게이트 / 노이즈 차단)
+    # ▶ 추천값(시작): 0.20
+    # ▶ 추천범위:
+    #    - 0.10 ~ 0.15 : 약하게 닫기 (진입 조금만 줄고, 노이즈 일부만 제거)
+    #    - 0.20 ~ 0.30 : 표준(권고) (의미 있는 하락만 남김, 데이터 해석 가장 깔끔)
+    #    - 0.40 ~ 0.60 : 강하게 닫기 (진입 크게 감소, 추세 구간만 남음)
+    # ▶ 이유: 실제 하방 움직임이 '숫자로 증명'된 뒤에만 들어가게" 만들어
+    #         이후 성과 변화가 이 게이트 효과로만 해석되게 함.
+
+
+    # --------------------------------------------------------
     # [10~19] EXIT (SHORT)
     # --------------------------------------------------------
-    "10_SL_PCT": 0.60,          # 손절
-    "11_TP1_PCT": 0.70,         # TP1 트리거
-    "12_PULLBACK_PCT": 0.45,    # 단일 FINAL EXIT 되돌림 %
-    "13_TP_PARTIAL_PCT": 0.5,   # TP1 부분익절 비율
+    "15_SL_PCT": 0.60,          # 손절
+    "16_TP1_PCT": 0.70,         # TP1 트리거
+    "17_TP_PARTIAL_PCT": 0.50,  # TP1 부분익절 비율
+    "18_PULLBACK_PCT": 0.45,    # 단일 FINAL EXIT 되돌림 %
 
     # --------------------------------------------------------
     # [20~29] CONTROL / LOCK
     # --------------------------------------------------------
-    "20_EXIT_COOLDOWN_SEC": 300, # EXIT 후 재진입 금지
-    "21_MIN_HOLD_SEC": 300,      # ENTRY 직후 즉시 EXIT 금지 (엔진 안정 락)
+    "20_EXIT_COOLDOWN_SEC": 300,
+    "21_MIN_HOLD_SEC": 300,
 
     # --------------------------------------------------------
     # [90~99] LOOP
     # --------------------------------------------------------
-    "99_LOOP_SEC": 5,           # 엔진 루프 주기 (초)
+    "99_LOOP_SEC": 5,
 }
 
 # ============================================================
@@ -69,15 +87,16 @@ def now_ts():
 # ============================================================
 # BINANCE
 # ============================================================
-from binance.client import Client
-from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
-
 def init_binance_client():
     k = os.getenv("BINANCE_API_KEY")
     s = os.getenv("BINANCE_API_SECRET")
     if not k or not s:
         raise RuntimeError("API KEY missing")
     return Client(k, s)
+
+def get_realtime_price(client):
+    t = client.futures_symbol_ticker(symbol=CFG["01_TRADE_SYMBOL"])
+    return float(t["price"])
 
 class FX:
     def __init__(self, client):
@@ -109,43 +128,6 @@ class FX:
         return float(qs)
 
 # ============================================================
-# MARKET (시각화/리서치 입력 전용)
-# ============================================================
-BINANCE_SPOT = "https://api.binance.com/api/v3/klines"
-INTERVAL = "5m"
-EMA_PERIOD = 9
-
-_rest = {"ema": []}
-
-def poll_kline(symbol):
-    kl = requests.get(
-        BINANCE_SPOT,
-        params={"symbol": symbol, "interval": INTERVAL, "limit": EMA_PERIOD + 5},
-        timeout=5
-    ).json()
-
-    k = kl[-2]  # 완료봉 (참고용)
-    bar_ts = int(k[6])
-    close = float(k[4])
-    low = float(k[3])
-
-    if not _rest["ema"]:
-        ema = close
-    else:
-        alpha = 2 / (EMA_PERIOD + 1)
-        ema = close * alpha + _rest["ema"][-1] * (1 - alpha)
-
-    _rest["ema"].append(ema)
-    _rest["ema"] = _rest["ema"][-50:]
-
-    return {
-        "bar_ts": bar_ts,
-        "close": close,
-        "low": low,
-        "ema": ema,
-    }
-
-# ============================================================
 # STATE
 # ============================================================
 def init_state():
@@ -155,10 +137,10 @@ def init_state():
         # candidate
         "has_candidate": False,
         "candidate_ts": None,
-        "candidate_ref_bar_ts": None,
+        "candidate_ref_price": None,
 
         # position
-        "position": None,            # "SHORT"
+        "position": None,
         "entry_ts": None,
         "entry_price": None,
         "position_qty": 0.0,
@@ -167,11 +149,9 @@ def init_state():
         # exit refs
         "sl_price": None,
         "tp_price": None,
-
-        # tracking
-        "tp_partial_done": False,
         "anchor_low": None,
         "pullback_price": None,
+        "tp_partial_done": False,
 
         # locks
         "last_exit_ts": None,
@@ -197,13 +177,15 @@ def can_exit(state):
         return False
     return (state["now_ts"] - state["entry_ts"]) >= CFG["21_MIN_HOLD_SEC"]
 
-def update_anchor_and_pullback(state, mkt):
-    if state["anchor_low"] is None:
-        state["anchor_low"] = state["entry_price"]
-    state["anchor_low"] = q(min(state["anchor_low"], mkt["low"]))
-    state["pullback_price"] = q(
-        state["anchor_low"] * (1 + CFG["12_PULLBACK_PCT"] / 100)
-    )
+# ============================================================
+# STEP 05 — EXECUTION MIN PRICE MOVE GATE
+# ============================================================
+def pass_min_price_move_gate(state, price):
+    ref = state["candidate_ref_price"]
+    if ref is None:
+        return False
+    move_pct = (ref - price) / ref * 100
+    return move_pct >= CFG["05_EXECUTION_MIN_PRICE_MOVE_PCT"]
 
 # ============================================================
 # ENGINE
@@ -221,22 +203,25 @@ def run():
 
     while True:
         state["now_ts"] = now_ts()
-        mkt = poll_kline(CFG["01_TRADE_SYMBOL"])
-        price = mkt["close"]
+        price = get_realtime_price(client)
 
         # ----------------------------
-        # 1) CANDIDATE
+        # 1) CANDIDATE (PRICE < EMA 개념 제거 → 단순 이벤트)
         # ----------------------------
-        if (not state["has_candidate"]) and (mkt["low"] < mkt["ema"]):
+        if not state["has_candidate"]:
             state["has_candidate"] = True
             state["candidate_ts"] = state["now_ts"]
-            state["candidate_ref_bar_ts"] = mkt["bar_ts"]
-            print(f"[CANDIDATE] ts={state['candidate_ts']}")
+            state["candidate_ref_price"] = price
+            print(f"[CANDIDATE] ref_price={q(price)}")
 
         # ----------------------------
-        # 2) ENTRY
+        # 2) ENTRY (GATE STACK)
         # ----------------------------
         if state["has_candidate"] and can_enter(state):
+            if not pass_min_price_move_gate(state, price):
+                time.sleep(CFG["99_LOOP_SEC"])
+                continue
+
             qty = fx.order(
                 "SELL",
                 (CFG["02_CAPITAL_BASE_USDT"] * 0.95) / price,
@@ -249,14 +234,14 @@ def run():
                     "entry_price": price,
                     "position_qty": qty,
                     "remain_qty": qty,
-                    "sl_price": q(price * (1 + CFG["10_SL_PCT"] / 100)),
-                    "tp_price": q(price * (1 - CFG["11_TP1_PCT"] / 100)),
-                    "tp_partial_done": False,
+                    "sl_price": q(price * (1 + CFG["15_SL_PCT"] / 100)),
+                    "tp_price": q(price * (1 - CFG["16_TP1_PCT"] / 100)),
                     "anchor_low": price,
                     "pullback_price": None,
+                    "tp_partial_done": False,
                     "has_candidate": False,
                     "candidate_ts": None,
-                    "candidate_ref_bar_ts": None,
+                    "candidate_ref_price": None,
                 })
                 print(f"[ENTRY] SELL price={q(price)} qty={qty}")
 
@@ -268,34 +253,31 @@ def run():
                 time.sleep(CFG["99_LOOP_SEC"])
                 continue
 
-            update_anchor_and_pullback(state, mkt)
+            state["anchor_low"] = min(state["anchor_low"], price)
+            state["pullback_price"] = q(
+                state["anchor_low"] * (1 + CFG["18_PULLBACK_PCT"] / 100)
+            )
 
-            # SL
             if price >= state["sl_price"]:
                 fx.order("BUY", state["remain_qty"], reduce_only=True)
-                print(f"[EXIT] SL price={q(price)}")
+                print("[EXIT] SL")
                 state["last_exit_ts"] = state["now_ts"]
                 state.clear(); state.update(init_state())
 
-            # TP PARTIAL
-            elif (not state["tp_partial_done"]) and (price <= state["tp_price"]):
-                part = state["remain_qty"] * CFG["13_TP_PARTIAL_PCT"]
+            elif (not state["tp_partial_done"]) and price <= state["tp_price"]:
+                part = state["remain_qty"] * CFG["17_TP_PARTIAL_PCT"]
                 closed = fx.order("BUY", part, reduce_only=True)
                 state["remain_qty"] = q(state["remain_qty"] - closed, 10)
                 state["tp_partial_done"] = True
-                print(f"[TP_PARTIAL] qty={q(closed,8)} remain={q(state['remain_qty'],8)}")
+                print(f"[TP_PARTIAL] qty={q(closed,8)}")
 
-            # FINAL EXIT (pullback)
             elif price >= state["pullback_price"]:
                 fx.order("BUY", state["remain_qty"], reduce_only=True)
-                print(
-                    f"[EXIT] FINAL price={q(price)} "
-                    f"anchor={state['anchor_low']} pullback={state['pullback_price']}"
-                )
+                print("[EXIT] FINAL")
                 state["last_exit_ts"] = state["now_ts"]
                 state.clear(); state.update(init_state())
 
         time.sleep(CFG["99_LOOP_SEC"])
 
 if __name__ == "__main__":
-    run()
+    run()    
