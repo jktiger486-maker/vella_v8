@@ -49,6 +49,14 @@ CFG = {
     # ▶ 이유: 실제 하방 움직임이 '숫자로 증명'된 뒤에만 들어가게" 만들어
     #         이후 성과 변화가 이 게이트 효과로만 해석되게 함.
 
+    "06_EMA_BELOW_HOLD_SEC": 600,   
+    # ★ 추가: EMA 아래 '연속 유지' ts 게이트(봉 없음)
+    # - price < EMA 상태가 00초 연속 유지되어야 ENTRY 허용
+    # - EMA 터치 즉시 진입(휩쏘) 차단 목적
+
+    "07_CANDIDATE_MIN_SEC": 300,   # 후보(ref 갱신 이후 최소 대기 시간)
+    # - 후보는 건드리지 않고, ENTRY 전에 최소 대기만 강제
+
 
 
     # --------------------------------------------------------
@@ -64,7 +72,7 @@ CFG = {
     # --------------------------------------------------------
     "20_EXIT_COOLDOWN_SEC": 300,
     "21_MIN_HOLD_SEC": 600,
-    "22_CANDIDATE_MIN_SEC": 30,   # 후보(ref 갱신 이후 최소 대기 시간)
+
 
     # --------------------------------------------------------
     # [90~99] LOOP
@@ -142,6 +150,9 @@ def init_state():
         "candidate_ref_ts": None,      # ★ ref(최고가) 마지막 갱신 시점
         "candidate_ref_price": None,
 
+        # 🔽 추가
+        "ema_below_since": None,   # EMA 아래로 내려간 최초 ts    
+
         # position
         "position": None,
         "entry_ts": None,
@@ -199,7 +210,7 @@ def pass_candidate_age_gate(state):
     ref_ts = state.get("candidate_ref_ts")
     if ref_ts is None:
         return False
-    return (state["now_ts"] - ref_ts) >= CFG["22_CANDIDATE_MIN_SEC"]
+    return (state["now_ts"] - ref_ts) >= CFG["07_CANDIDATE_MIN_SEC"]
 
 
 
@@ -215,11 +226,26 @@ def run():
     fx = FX(client)
     state = init_state()
 
+    # ★ EMA 상태 (엔진 내부, 단일 ts)
+    ema = None
+    EMA_PERIOD = 9
+
+
+
     print("ENGINE START")
 
     while True:
         state["now_ts"] = now_ts()
         price = get_realtime_price(client)
+
+        # ----------------------------
+        # EMA UPDATE (REALTIME, TS SINGLE)
+        # ----------------------------
+        if ema is None:
+            ema = price
+        else:
+            alpha = 2 / (EMA_PERIOD + 1)
+            ema = ema + alpha * (price - ema)
 
         # ----------------------------
         # 1) CANDIDATE (단순 이벤트 + ref 고점 추적)
@@ -251,6 +277,22 @@ def run():
             if not pass_candidate_age_gate(state):
                 time.sleep(CFG["99_LOOP_SEC"])
                 continue
+
+            # ③ EMA BELOW HOLD GATE
+            if price < ema:
+                if state["ema_below_since"] is None:
+                    state["ema_below_since"] = state["now_ts"]
+            else:
+                # EMA 위로 올라오면 리셋
+                state["ema_below_since"] = None
+            if (
+                state["ema_below_since"] is None or
+                (state["now_ts"] - state["ema_below_since"]) < CFG["06_EMA_BELOW_HOLD_SEC"]
+            ):
+                time.sleep(CFG["99_LOOP_SEC"])
+                continue
+
+
 
             # ▶▶ 여기부터가 "진짜 ENTRY" ◀◀
 
