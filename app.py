@@ -206,13 +206,17 @@ def run():
         price = get_realtime_price(client)
 
         # ----------------------------
-        # 1) CANDIDATE (PRICE < EMA 개념 제거 → 단순 이벤트)
+        # 1) CANDIDATE (단순 이벤트 + ref 고점 추적)
         # ----------------------------
         if not state["has_candidate"]:
             state["has_candidate"] = True
             state["candidate_ts"] = state["now_ts"]
             state["candidate_ref_price"] = price
             print(f"[CANDIDATE] ref_price={q(price)}")
+        else:
+            # 숏 기준: 후보가 살아있는 동안 최고가를 ref로 유지
+            if price > state["candidate_ref_price"]:
+                state["candidate_ref_price"] = price
 
         # ----------------------------
         # 2) ENTRY (GATE STACK)
