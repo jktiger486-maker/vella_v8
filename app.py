@@ -50,6 +50,7 @@ CFG = {
     #         이후 성과 변화가 이 게이트 효과로만 해석되게 함.
 
 
+
     # --------------------------------------------------------
     # [10~19] EXIT (SHORT)
     # --------------------------------------------------------
@@ -63,6 +64,7 @@ CFG = {
     # --------------------------------------------------------
     "20_EXIT_COOLDOWN_SEC": 300,
     "21_MIN_HOLD_SEC": 300,
+    "22_CANDIDATE_MIN_SEC": 30,   # 후보(ref 갱신 이후 최소 대기 시간)
 
     # --------------------------------------------------------
     # [90~99] LOOP
@@ -137,6 +139,7 @@ def init_state():
         # candidate
         "has_candidate": False,
         "candidate_ts": None,
+        "candidate_ref_ts": None,      # ★ ref(최고가) 마지막 갱신 시점
         "candidate_ref_price": None,
 
         # position
@@ -187,6 +190,19 @@ def pass_min_price_move_gate(state, price):
     move_pct = (ref - price) / ref * 100
     return move_pct >= CFG["05_EXECUTION_MIN_PRICE_MOVE_PCT"]
 
+
+# ============================================================
+# STEP 06 — CANDIDATE AGE GATE (시간 게이트)
+# ============================================================
+def pass_candidate_age_gate(state):
+    # 후보 생성(or ref 갱신) 후 최소 시간 경과 요구
+    ref_ts = state.get("candidate_ref_ts")
+    if ref_ts is None:
+        return False
+    return (state["now_ts"] - ref_ts) >= CFG["22_CANDIDATE_MIN_SEC"]
+
+
+
 # ============================================================
 # ENGINE
 # ============================================================
@@ -212,19 +228,32 @@ def run():
             state["has_candidate"] = True
             state["candidate_ts"] = state["now_ts"]
             state["candidate_ref_price"] = price
+            state["candidate_ref_ts"] = state["now_ts"]   # ★ 최초 ref 시점
             print(f"[CANDIDATE] ref_price={q(price)}")
         else:
             # 숏 기준: 후보가 살아있는 동안 최고가를 ref로 유지
             if price > state["candidate_ref_price"]:
                 state["candidate_ref_price"] = price
+                state["candidate_ref_ts"] = state["now_ts"]  # ★ ref 갱신 시점
+
 
         # ----------------------------
         # 2) ENTRY (GATE STACK)
         # ----------------------------
         if state["has_candidate"] and can_enter(state):
+
+            # ① 가격 이동 게이트
             if not pass_min_price_move_gate(state, price):
                 time.sleep(CFG["99_LOOP_SEC"])
                 continue
+
+            # ② 시간 게이트 (candidate age)
+            if not pass_candidate_age_gate(state):
+                time.sleep(CFG["99_LOOP_SEC"])
+                continue
+
+            # ▶▶ 여기부터가 "진짜 ENTRY" ◀◀
+
 
             qty = fx.order(
                 "SELL",
