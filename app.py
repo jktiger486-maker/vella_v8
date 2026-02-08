@@ -187,10 +187,10 @@ def fetch_klines(symbol, interval, limit):
 
 def collect_data(symbol):
     klines_15m = fetch_klines(symbol, "15m", 50)
-    klines_1h = fetch_klines(symbol, "60m", 30)
+    klines_1h = fetch_klines(symbol, "1h", 30)
     klines_1m = fetch_klines(symbol, "1m", 5)
     btc_klines_daily = fetch_klines("BTCUSDT", "1d", 2)
-    btc_klines_1h = fetch_klines("BTCUSDT", "60m", 30)
+    btc_klines_1h = fetch_klines("BTCUSDT", "1h", 30)
     
     if klines_15m is None or klines_1h is None or klines_1m is None or btc_klines_daily is None or btc_klines_1h is None:
         return None
