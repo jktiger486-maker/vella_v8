@@ -34,7 +34,9 @@ CFG = {
     "16_SPREAD_MAX": 99.0,
     "07_DEAD_MARKET_ENABLE": False,
     "17_ATR_MIN_PCT": 0.0,
-    "08_MATH_GUARD_ENABLE": True,
+    "08_MATH_GUARD_ENABLE": True,  # 항상 True 로
+    # 계산 결과가 이상하면 ENTRY / EXIT 전부 스킵
+    # 로그 찍고 아무것도 안 함
     "09_FUNDING_ENABLE": False,
     
     # [20~29] STAGE 2: ENTRY — EXIT 조건
@@ -57,7 +59,7 @@ CFG = {
     
     # [50~69] STAGE 4: EXIT — 최소 안전만
     "50_SL_PCT": 5.0,
-    "54_SLOPE_LOOKBACK": 1,
+    "54_SLOPE_LOOKBACK": 2,
     "54_SLOPE_EXIT_PCT": 999.0,
     "54_SLOPE_EMA": 10,
     "56_EXIT_EMA_FAST": 10,
