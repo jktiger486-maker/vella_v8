@@ -166,11 +166,24 @@ def calc_ema(prices, period):
 
 def fetch_klines(symbol, interval, limit):
     try:
-        resp = requests.get(BINANCE_API, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=5)
-        return resp.json()
+        resp = requests.get(
+            BINANCE_API,
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=5
+        )
+        data = resp.json()
+
+        # 🔒 SAFETY GUARD: Binance error response is dict, not list
+        if not isinstance(data, list):
+            print(f"fetch_klines invalid response ({symbol} {interval}): {data}")
+            return None
+
+        return data
+
     except Exception as e:
-        print(f"fetch_klines error: {e}")
+        print(f"fetch_klines exception ({symbol} {interval}): {e}")
         return None
+
 
 def collect_data(symbol):
     klines_15m = fetch_klines(symbol, "15m", 50)
