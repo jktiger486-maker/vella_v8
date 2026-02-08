@@ -34,12 +34,13 @@ CFG = {
     "16_SPREAD_MAX": 99.0,
     "07_DEAD_MARKET_ENABLE": False,
     "17_ATR_MIN_PCT": 0.0,
-    "08_MATH_GUARD_ENABLE": True,   # ❗ 이건 유지 (None 방지)
+    "08_MATH_GUARD_ENABLE": True,
     "09_FUNDING_ENABLE": False,
     
-    # [20~29] STAGE 2: ENTRY — 최소 조건만 유지
+    # [20~29] STAGE 2: ENTRY — EXIT 조건
     "21_ENTRY_EMA_FAST": 10,
     "22_ENTRY_EMA_SLOW": 20,
+    "56_EXIT_EMA_SLOW": 15,
     
     # [30~49] STAGE 3: ENTRY MANAGEMENT — 전부 해제
     "30_IK_VWAP_ENABLE": False,
@@ -55,12 +56,12 @@ CFG = {
     "38_SURVIVAL_ENABLE": False,
     
     # [50~69] STAGE 4: EXIT — 최소 안전만
-    "50_SL_PCT": 5.0,              # ❗ 너무 작게 하지 말 것
+    "50_SL_PCT": 5.0,
     "54_SLOPE_LOOKBACK": 1,
-    "54_SLOPE_EXIT_PCT": 999.0,    # 사실상 비활성
+    "54_SLOPE_EXIT_PCT": 999.0,
     "54_SLOPE_EMA": 10,
     "56_EXIT_EMA_FAST": 10,
-    "56_EXIT_EMA_SLOW": 15,
+
 }
 
 # ============================================================
@@ -172,18 +173,16 @@ def fetch_klines(symbol, interval, limit):
             timeout=5
         )
         data = resp.json()
-
-        # 🔒 SAFETY GUARD: Binance error response is dict, not list
+        
         if not isinstance(data, list):
             print(f"fetch_klines invalid response ({symbol} {interval}): {data}")
             return None
-
+        
         return data
-
+    
     except Exception as e:
         print(f"fetch_klines exception ({symbol} {interval}): {e}")
         return None
-
 
 def collect_data(symbol):
     klines_15m = fetch_klines(symbol, "15m", 50)
@@ -213,17 +212,22 @@ def collect_data(symbol):
     current_volume = float(k_current[5])
     bar_ts = int(k_current[6])
     
-    ema_periods = set([
-        CFG["21_ENTRY_EMA_FAST"],
-        CFG["22_ENTRY_EMA_SLOW"],
-        CFG["41_IK_EMA_FAST"],
-        CFG["42_IK_EMA_SLOW"],
-        CFG["43_BIG_EMA_FAST"],
-        CFG["44_BIG_EMA_SLOW"],
-        CFG["54_SLOPE_EMA"],
-        CFG["56_EXIT_EMA_FAST"],
-        CFG["56_EXIT_EMA_SLOW"]
-    ])
+    ema_periods = set()
+    
+    ema_periods.add(CFG["21_ENTRY_EMA_FAST"])
+    ema_periods.add(CFG["22_ENTRY_EMA_SLOW"])
+    
+    if CFG.get("31_IK_EMA_ENABLE"):
+        ema_periods.add(CFG["41_IK_EMA_FAST"])
+        ema_periods.add(CFG["42_IK_EMA_SLOW"])
+    
+    if CFG.get("33_BIG_EMA_ENABLE"):
+        ema_periods.add(CFG["43_BIG_EMA_FAST"])
+        ema_periods.add(CFG["44_BIG_EMA_SLOW"])
+    
+    ema_periods.add(CFG["54_SLOPE_EMA"])
+    ema_periods.add(CFG["56_EXIT_EMA_FAST"])
+    ema_periods.add(CFG["56_EXIT_EMA_SLOW"])
     
     ema_values = {}
     for period in ema_periods:
@@ -451,9 +455,6 @@ def s3_p4_big_ema(data, ctx):
         if ema_fast is None or ema_slow is None:
             return False
         
-        # DESIGN NOTE:
-        # EMA expansion threshold is a fixed structural noise guard.
-        # This value is NOT a strategy parameter and is not subject to tuning.
         ema_distance = abs(ema_fast - ema_slow)
         ema_expanding = ema_distance > 0.0001
         
@@ -516,10 +517,6 @@ def stage3_management(data, ctx):
 def s4_p1_sl(data, ctx):
     if ctx.entry_price is None:
         return False
-    # SHORT POSITION LOSS:
-    # Entry at X, current price rises → loss increases
-    # Formula: (current - entry) / entry * 100
-    # Positive result = price went up = SHORT loss
     loss_pct = (data["close"] - ctx.entry_price) / ctx.entry_price * 100
     result = loss_pct > CFG["50_SL_PCT"]
     if result:
@@ -576,11 +573,6 @@ def emergency_close(fx, ctx):
         print("Position closed")
 
 def run():
-    # ENGINE GUARANTEE:
-    # - All decisions are based on REST completed candle only
-    # - data["bar_ts"] == closed candle timestamp
-    # - No intra-bar logic allowed
-    
     if not CFG["ENGINE_ENABLE"]:
         print("ENGINE DISABLED")
         return
