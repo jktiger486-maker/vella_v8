@@ -382,7 +382,7 @@ class FX:
 # ============================================================
 # MARKET DATA
 # ============================================================
-BINANCE_API = "https://api.binance.com/api/v3/klines"
+BINANCE_API = "https://fapi.binance.com/fapi/v1/klines"
 
 def calc_ema(prices, period):
     if len(prices) < period:
