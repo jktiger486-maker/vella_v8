@@ -18,7 +18,7 @@ from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
 # ============================================================
 CFG = {
     # BASIC
-    "TRADE_SYMBOL": "SUIUSDT",
+    "TRADE_SYMBOL": "1000XECUSDT",
     "CAPITAL_USDT": 30,
     "ENGINE_ENABLE": True,
     "LEVERAGE": 1,
