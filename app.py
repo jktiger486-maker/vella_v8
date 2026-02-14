@@ -9,68 +9,64 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
 # ============================================================
-# CFG
+# CFG V8_숏
 # ============================================================
 # 20260210_1730 : 클로드 엔트리 + 벨라 n봉 엑시트 기본 매매확인후 필터 추가
 # 20260210_1940 : 매매확인 튜닝 13번 8>20, 14번 5>2 16번 30>5
 # 20260211      : on_entry_fired 추가, 22번 OFF, EXIT후 entry_fired 리셋
 # 20260211_v2   : 벨라 의견 — pullback EMA_MID 깊이 기준 강화
 # 20260211_v3   : 벨라 의견 — slope_bars 2→3, spread 0.0004→0.0012, min_len 60→45
+# 20260215_BASE : 브9 ENTRY/EXIT 이식 + 21_MAX_ENTRY_PER_TREND 구현
+# 20260215_FIX  : entry_fired 리셋 로직 수정 + 21번 0으로 변경 + EMA 중복 계산 제거
 
 CFG = {
-    # -------------------------
+    # ========================================================
     # BASIC
-    # -------------------------
+    # ========================================================
     "01_TRADE_SYMBOL": "SUIUSDT",
     "02_INTERVAL": "5m",
     "03_CAPITAL_BASE_USDT": 30.0,
     "04_LEVERAGE": 1,
 
-    # -------------------------
-    # ENTRY (v8 SHORT)
-    # -------------------------
-    "10_EMA_FAST": 10,
-    "11_EMA_MID": 15,
+    # ========================================================
+    # ENTRY (EMA CROSS ONLY)
+    # ========================================================
+    # EMA_FAST ↓ EMA_MID + EMA_MID < EMA_SLOW
+    "10_EMA_FAST": 9,
+    "11_EMA_MID": 14,
     "12_EMA_SLOW": 20,
 
-    "13_PULLBACK_N": 20,   # 아직 미구현
-    "14_SLOPE_BARS": 3,    # 2→3 : 되돌림 최소 3봉 요구 (노이즈 제거)
-    "15_SPREAD_MIN": 0.0012,  # 0.0004→0.0012 : 추세 확실한 구간만 진입
-    "16_PEAK_BARS": 5,     # 아직 미구현
+    # 아래 항목들은 현재 전략에서 사용하지 않음 (영향 0)
+    "13_PULLBACK_N": 0,
+    "14_SLOPE_BARS": 4,
+    "15_SPREAD_MIN": 0.0,
+    "16_PEAK_BARS": 0,
 
-    # -------------------------
-    # ENTRY MANAGEMENT FILTERS
-    # -------------------------
+    # ========================================================
+    # ENTRY MANAGEMENT
+    # ========================================================
     "20_ENTRY_COOLDOWN_BARS": 0,
-    "21_MAX_ENTRY_PER_TREND": 1,  # 아직 미구현
-
+    "21_MAX_ENTRY_PER_TREND": 0,   # 0 = OFF
     "22_ENTRY_MAX_DROP_PCT": 0.0,
-    # OFF (검증 단계)
-    # 나중에 과최적화 방지용 브레이크로 사용
-    # 적정값: 알트 2.0 / BTC 1.0~1.5
 
-    # -------------------------
-    # EXIT (Bella SHORT)
-    # -------------------------
-    "30_EXIT_AVG_N": 3,
-    "31_EXIT_USE_PREV_N_ONLY": True,
-
-    # -------------------------
-    # EXIT OPTIONS
-    # -------------------------
+    # ========================================================
+    # EXIT (EMA_MID BREAK ONLY)
+    # ========================================================
+    # close > EMA_MID → EXIT
     "40_SL_ENABLE": False,
     "41_SL_PCT": 2.0,
 
     "50_TIMEOUT_EXIT_ENABLE": False,
     "51_TIMEOUT_BARS": 60,
 
-    # -------------------------
+    # ========================================================
     # ENGINE
-    # -------------------------
-    "90_KLINE_LIMIT": 240,
+    # ========================================================
+    "90_KLINE_LIMIT": 1500,
     "91_POLL_SEC": 7,
     "92_LOG_LEVEL": "INFO",
 }
+
 
 # ============================================================
 # LOGGING
@@ -200,6 +196,9 @@ class EngineState:
     entry_state: ShortEntryState = field(default_factory=ShortEntryState)
     position: Optional[Position] = None
     close_history: List[float] = None
+    in_downtrend: bool = False
+    entry_count_in_trend: int = 0
+    ema_mid_now: float = 0.0
 
     def __post_init__(self):
         self.close_history = []
@@ -211,80 +210,44 @@ class EngineState:
 def on_entry_fired(st: ShortEntryState):
     st.entry_fired = True
 
-def short_entry_signal(closes, st):
-    slope_bars = int(CFG["14_SLOPE_BARS"])
-    min_len = max(CFG["12_EMA_SLOW"], 45) + slope_bars + 1
-
-    if len(closes) < min_len:
+def short_entry_signal(closes, st, engine_st):
+    if len(closes) < max(CFG["12_EMA_SLOW"], 60):
         return False
 
     ema_fast_s = ema_series(closes, CFG["10_EMA_FAST"])
     ema_mid_s  = ema_series(closes, CFG["11_EMA_MID"])
     ema_slow_s = ema_series(closes, CFG["12_EMA_SLOW"])
 
-    ema_fast      = ema_fast_s[-1]
-    ema_mid       = ema_mid_s[-1]
-    ema_slow      = ema_slow_s[-1]
-    close         = closes[-1]
-    prev_close    = closes[-2]
-    prev_ema_fast = ema_fast_s[-2]
+    ema_fast = ema_fast_s[-1]
+    ema_mid  = ema_mid_s[-1]
+    ema_slow = ema_slow_s[-1]
 
-    # 1) 하방 정렬
     stack_now = (ema_fast < ema_mid) and (ema_mid < ema_slow)
     if not stack_now:
-        st.entry_fired = False
         return False
 
-    # 2) EMA 스프레드 필터 (0.0004→0.0012: 추세 확실한 구간만)
-    spread = (ema_slow - ema_fast) / ema_slow
-    if spread < CFG["15_SPREAD_MIN"]:
+    max_entry = int(CFG["21_MAX_ENTRY_PER_TREND"])
+    if max_entry > 0 and engine_st.entry_count_in_trend >= max_entry:
         return False
 
-    # 3) LATE ENTRY CUT (0.0 이면 OFF)
-    lb = int(CFG["13_PULLBACK_N"])
-    max_drop = float(CFG["22_ENTRY_MAX_DROP_PCT"])
-    if max_drop > 0.0 and lb > 0 and len(closes) >= lb + 1:
-        recent_high = max(closes[-(lb + 1):-1])
-        drop_pct = (recent_high - close) / recent_high * 100.0
-        if drop_pct > max_drop:
-            return False
-
-    # 4) 1-shot
     if st.entry_fired:
         return False
 
-    # 5) 되돌림 깊이 확인 (옵션 A — EMA_MID 기준)
-    # 직전 slope_bars(3)봉 중 close >= EMA_MID 인 봉이 존재해야 함
-    # 의미: EMA_MID(15)까지 올라온 의미 있는 되돌림만 인정
-    # slope_bars 2→3 으로 노이즈 추가 제거
-    pullback_confirmed = any(
-        closes[-(i + 2)] >= ema_mid_s[-(i + 2)]
-        for i in range(slope_bars)
+    raw_signal = (
+        (ema_fast_s[-2] >= ema_mid_s[-2]) and
+        (ema_fast < ema_mid) and
+        (ema_mid < ema_slow)
     )
-    if not pullback_confirmed:
+    
+    if not raw_signal:
+        st.entry_fired = False
         return False
-
-    # 6) EMA_FAST 하향 돌파 (되돌림 후 재하락 첫 봉)
-    cross_down = (prev_close >= prev_ema_fast) and (close < ema_fast)
-    return cross_down
+    
+    return raw_signal
 
 # ============================================================
 # EXIT
 # ============================================================
-
-def bella_exit_core_avg_break(closes, n):
-    n = int(n)
-    if n <= 0:
-        return False
-    if len(closes) < n + 1:
-        return False
-    current = closes[-1]
-    if CFG["31_EXIT_USE_PREV_N_ONLY"]:
-        prev = closes[-(n + 1):-1]
-        avg = sum(prev) / n
-    else:
-        avg = sum(closes[-n:]) / n
-    return current > avg
 
 def exit_option_sl(close, entry_price):
     if not CFG["40_SL_ENABLE"]:
@@ -306,7 +269,7 @@ def exit_signal(state):
         return True
     if exit_option_timeout(state.bar, pos.entry_bar):
         return True
-    if bella_exit_core_avg_break(state.close_history, int(CFG["30_EXIT_AVG_N"])):
+    if close > state.ema_mid_now:
         return True
     return False
 
@@ -397,7 +360,6 @@ def engine():
                 time.sleep(CFG["91_POLL_SEC"])
                 continue
 
-            # COLD START
             if not st.close_history:
                 for k in kl[:-1]:
                     st.close_history.append(float(k[4]))
@@ -414,11 +376,31 @@ def engine():
             if len(st.close_history) > 2000:
                 st.close_history = st.close_history[-2000:]
 
+            if len(st.close_history) >= max(CFG["12_EMA_SLOW"], 60):
+                ema_fast_s = ema_series(st.close_history, CFG["10_EMA_FAST"])
+                ema_mid_s  = ema_series(st.close_history, CFG["11_EMA_MID"])
+                ema_slow_s = ema_series(st.close_history, CFG["12_EMA_SLOW"])
+                
+                ema_fast = ema_fast_s[-1]
+                ema_mid  = ema_mid_s[-1]
+                ema_slow = ema_slow_s[-1]
+                
+                st.ema_mid_now = ema_mid
+                
+                stack_now = (ema_fast < ema_mid) and (ema_mid < ema_slow)
+                
+                if stack_now and not st.in_downtrend:
+                    st.in_downtrend = True
+                    st.entry_count_in_trend = 0
+                elif not stack_now and st.in_downtrend:
+                    st.in_downtrend = False
+                    st.entry_count_in_trend = 0
+
             if st.position is None:
                 if st.bar < st.cooldown_until_bar:
                     continue
 
-                if short_entry_signal(st.close_history, st.entry_state):
+                if short_entry_signal(st.close_history, st.entry_state, st):
                     order = place_short_entry(client, symbol, capital, lot)
                     if order:
                         st.position = Position(
@@ -428,6 +410,7 @@ def engine():
                             entry_bar=st.bar,
                         )
                         on_entry_fired(st.entry_state)
+                        st.entry_count_in_trend += 1
 
                         cd = int(CFG["20_ENTRY_COOLDOWN_BARS"])
                         if cd > 0:
@@ -445,9 +428,6 @@ def engine():
                     if ok:
                         log.info(f"[EXIT] SHORT close={close} entry={st.position.entry_price} bar={st.bar}")
                         st.position = None
-
-                        # EXIT 후 entry_fired 리셋
-                        # stack 유지 장에서 영구 차단 방지
                         st.entry_state.entry_fired = False
 
                         cd = int(CFG["20_ENTRY_COOLDOWN_BARS"])
