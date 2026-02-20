@@ -47,14 +47,14 @@ CFG = {
     # ENTRY (v9 SHORT)
     # - trigger: EMA_FAST ↓ EMA_MID (dead cross)
     # -------------------------
-    "10_EMA_FAST": 9,
-    "11_EMA_MID": 14,
+    "10_EMA_FAST": 7,
+    "11_EMA_MID": 12,
 
     # -------------------------
     # ENTRY FILTER — STEP 1: EMA Slope PCT (횡보장 차단)
     # -------------------------
     "17_SLOPE_PCT_BARS": 2,
-    "18_SLOPE_PCT_MIN": 0.03,
+    "18_SLOPE_PCT_MIN": 0.04,
     # 0.02 = 약한 기울기만 요구 (노이즈 일부 제거)
     # 0.03 = ⭐ 브8 권고값 (횡보 차단 + 초입 속도 유지 균형)
     # 0.05 = 강추세만 허용 (진입 감소, 보수적 운용)
@@ -70,7 +70,7 @@ CFG = {
     # ENTRY MANAGEMENT FILTERS (plug-in slots)
     # -------------------------
     "20_ENTRY_COOLDOWN_BARS": 0,
-    "21_MAX_ENTRY_PER_TREND": 999,
+    "21_MAX_ENTRY_PER_TREND": 2,
 
     # -------------------------
     # ENTRY FILTER — STEP 3: Confirm Bars (시그널 후 N봉 확인)
@@ -80,7 +80,7 @@ CFG = {
     # -------------------------
     # EXIT
     # -------------------------
-    "30_EXIT_EMA": 4,
+    "30_EXIT_EMA": 5,
 
     # -------------------------
     # EXIT OPTIONS (plug-in slots; default OFF)
@@ -108,7 +108,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger("VELLA_v9_SHORT")
+log = logging.getLogger("VELLA_v8_SHORT")
 
 # ============================================================
 # BINANCE (v7 style)
