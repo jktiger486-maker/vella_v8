@@ -33,10 +33,10 @@ CFG = {
     "11_EMA_MID": 10,
     "12_EMA_ARENA": 30,
     "13_TOUCH_TOLERANCE": 0.001,
-    "14_SLOPE_THRESHOLD": 0.001,
+    "14_SLOPE_THRESHOLD": 0.003,
     "15_SWING_LOOKBACK": 5,
 
-    "23_ENTRY2_ENABLE": True,
+    "23_ENTRY2_ENABLE": False,
 
     # ---- EXIT EMA (TUNABLE) ----
     "30_EXIT_FAST_EMA": 5,
