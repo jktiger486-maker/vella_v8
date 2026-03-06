@@ -33,10 +33,13 @@ CFG = {
     "11_EMA_MID": 10,
     "12_EMA_ARENA": 30,
     "13_TOUCH_TOLERANCE": 0.001,
-    "14_SLOPE_THRESHOLD": 0.003,
+    "14_SLOPE_THRESHOLD": 0.005,
     "15_SWING_LOOKBACK": 5,
 
-    "23_ENTRY2_ENABLE": False,
+    "23_ENTRY2_ENABLE": True,
+
+    "16_MID_SLOPE_FILTER_ENABLE": False,
+    "17_MID_SLOPE_THRESHOLD": 0.0005,
 
     # ---- EXIT EMA (TUNABLE) ----
     "30_EXIT_FAST_EMA": 5,
@@ -273,7 +276,8 @@ def short_entry_signals(st: EngineState) -> str:
     if fast_prev is None or mid_prev is None:
         return ""
 
-    short_arena = fast_now < arena_now
+    # ARENA: EMA5 < EMA30 and EMA10 < EMA30
+    short_arena = (fast_now < arena_now) and (mid_now < arena_now)
     if not short_arena:
         return ""
 
@@ -287,6 +291,16 @@ def short_entry_signals(st: EngineState) -> str:
     if not slope_ok:
         return ""
 
+    # EMA10 slope 필터 (CFG 조정형)
+    mid_ref = mid.get_lookback(swing_lookback)
+    if mid_ref is None or mid_ref == 0:
+        return ""
+    mid_slope_val = (mid_now - mid_ref) / mid_ref
+    if bool(CFG["16_MID_SLOPE_FILTER_ENABLE"]):
+        mid_slope_ok = mid_slope_val <= -float(CFG["17_MID_SLOPE_THRESHOLD"])
+        if not mid_slope_ok:
+            return ""
+
     e1_signal = (fast_prev >= mid_prev) and (fast_now < mid_now)
 
     tolerance = float(CFG["13_TOUCH_TOLERANCE"])
@@ -295,6 +309,10 @@ def short_entry_signals(st: EngineState) -> str:
     pullback  = st.high_history[-2] >= fast_prev * (1.0 - tolerance)
     reentry   = st.close_history[-1] < fast_now
     e2_signal = pullback and reentry
+
+    log.info(
+        f"[ENTRY_CHECK] arena={short_arena} fast_slope={slope_val:.6f} mid_slope={mid_slope_val:.6f} e1={e1_signal} e2={e2_signal}"
+    )
 
     if e1_signal:
         return "E1"
@@ -476,12 +494,15 @@ def engine():
             _apply_bar(st, float(completed[4]), float(completed[2]), float(completed[3]))
 
             if st.ema_fast.ready and st.ema_arena.ready:
-                short_arena_now = st.ema_fast.get() < st.ema_arena.get()
+                short_arena_now = (
+                    (st.ema_fast.get() < st.ema_arena.get()) and
+                    (st.ema_mid.get() < st.ema_arena.get())
+                )
                 if short_arena_now != st.prev_arena_state:
                     if short_arena_now:
-                        log.info(f"[ARENA] fast<arena 통과")
+                        log.info(f"[ARENA] fast<arena and mid<arena 통과")
                     else:
-                        log.info(f"[ARENA] fast>=arena 차단")
+                        log.info(f"[ARENA] arena 차단 (need fast<arena and mid<arena)")
                     st.prev_arena_state = short_arena_now
 
             if st.position is None:
