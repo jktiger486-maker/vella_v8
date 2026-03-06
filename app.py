@@ -42,8 +42,8 @@ CFG = {
     "17_MID_SLOPE_THRESHOLD": 0.0005,
 
     # ---- EXIT EMA (TUNABLE) ----
-    "30_EXIT_FAST_EMA": 5,
-    "31_EXIT_MID_EMA": 10,
+    "30_EXIT_FAST_EMA": 4,
+    "31_EXIT_MID_EMA": 8,
 
     "40_SL_ENABLE": False,
     "41_SL_PCT": 1.2,
