@@ -42,26 +42,26 @@ from collections import deque
 # ============================================================
 
 CFG = {
-    "01_TRADE_SYMBOL": "SEIUSDT",
+    "01_TRADE_SYMBOL": "TIAUSDT",
     "02_INTERVAL": "5m",
     "03_CAPITAL_BASE_USDT": 10.0,
     "04_LEVERAGE": 1,
 
     # ---- ENTRY EMA (FROZEN) ----
-    "10_EMA_FAST": 5,
-    "11_EMA_MID": 10,
+    "10_EMA_FAST": 8,
+    "11_EMA_MID": 14,
     "12_EMA_ARENA": 30,
 
     # ---- 필터 강화 (FROZEN) ----
-    "13_TOUCH_TOLERANCE": 0.0006,
-    "14_SLOPE_THRESHOLD": 0.003,
-    "15_SWING_LOOKBACK": 7,
+    "13_TOUCH_TOLERANCE": 0.002,
+    "14_SLOPE_THRESHOLD": 0.002,
+    "15_SWING_LOOKBACK": 4,
 
     "23_ENTRY2_ENABLE": True,
 
     # ---- EXIT EMA (기존 유지) ----
-    "30_EXIT_FAST_EMA": 4,
-    "31_EXIT_MID_EMA": 8,
+    "30_EXIT_FAST_EMA": 6,
+    "31_EXIT_MID_EMA": 10,
 
     # ---- SL (최우선) ----
     "40_SL_ENABLE": True,
