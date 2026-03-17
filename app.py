@@ -54,8 +54,13 @@ CFG = {
 
     # ---- 필터 강화 (FROZEN) ----
     "13_TOUCH_TOLERANCE": 0.002,
-    "14_SLOPE_THRESHOLD": 0.002,
+    "14_SLOPE_THRESHOLD": 0.006,   # [수정 3] 0.002 → 0.006
     "15_SWING_LOOKBACK": 4,
+
+    # ---- ATR FILTER (횡보 차단 전용) ----
+    "16_ATR_FILTER_ENABLE": True,
+    "17_ATR_PERIOD": 14,
+    "18_ATR_THRESHOLD_PCT": 0.004,
 
     "23_ENTRY2_ENABLE": True,
 
@@ -73,12 +78,12 @@ CFG = {
 
     # ---- TP1 부분익절 ----
     "60_TP1_ENABLE": True,
-    "61_TP1_PCT": 0.004,          # 진입가 대비 -0.4% (숏: 가격 하락) 시 1차 익절
+    "61_TP1_PCT": 0.007,          # [수정 4] 0.004 → 0.007
     "62_TP1_PARTIAL_PCT": 0.50,   # 포지션의 50% 청산
 
     # ---- TRAILING (TP1 이후 잔량 전용 / non-SYNC 만) ----
     "70_TRAIL_ENABLE": True,
-    "71_TRAIL_CALLBACK_PCT": 0.004,  # 최저가 대비 +0.4% 반등 시 잔량 전량청산
+    "71_TRAIL_CALLBACK_PCT": 0.006,  # TP1 0.7%와 균형 맞춤
 
     "90_KLINE_LIMIT": 1500,
     "91_POLL_SEC": 5,
@@ -243,8 +248,9 @@ class Position:
     # [규칙] tp1_done 변경은 engine()에서 주문 성공 + 재동기화 후에만 허용
     # [규칙] tp1_done / qty 변경은 engine()에서 주문 성공 + 재동기화 후에만 허용
     # [규칙] trail_low 갱신은 exit_signal() 내부 소유 (TRAILING 판단과 일체)
-    tp1_done:    bool  = False
-    trail_low:   float = float("inf")   # 숏: 포지션 보유 중 최저가 추적
+    tp1_done:     bool  = False
+    trail_low:    float = float("inf")   # 숏: 포지션 보유 중 최저가 추적
+    be_activated: bool  = False          # BE 플래그 — SL 이동 전용 (청산 금지)
 
 @dataclass
 class EngineState:
@@ -255,6 +261,7 @@ class EngineState:
     close_history: Deque[float] = field(default_factory=lambda: deque(maxlen=2000))
     high_history:  Deque[float] = field(default_factory=lambda: deque(maxlen=2000))
     low_history:   Deque[float] = field(default_factory=lambda: deque(maxlen=2000))
+    atr_history:   Deque[float] = field(default_factory=lambda: deque(maxlen=200))
 
     ema_fast:      IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["10_EMA_FAST"]))
     ema_mid:       IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["11_EMA_MID"]))
@@ -361,6 +368,16 @@ def short_entry_signals(st: EngineState) -> str:
     if not _warmup_done(st):
         return ""
 
+    # --- ATR FILTER (횡보 차단) ---
+    if CFG["16_ATR_FILTER_ENABLE"]:
+        if len(st.atr_history) < CFG["17_ATR_PERIOD"]:
+            return ""
+        atr = sum(list(st.atr_history)[-CFG["17_ATR_PERIOD"]:]) / CFG["17_ATR_PERIOD"]
+        atr_pct = atr / st.close_history[-1]
+        if atr_pct < CFG["18_ATR_THRESHOLD_PCT"]:
+            log.debug(f"[ATR_BLOCK] atr_pct={atr_pct:.4f}")
+            return ""
+
     fast  = st.ema_fast
     mid   = st.ema_mid
     arena = st.ema_arena
@@ -390,6 +407,20 @@ def short_entry_signals(st: EngineState) -> str:
         )
         return ""
 
+    # --- [ADD] DISTANCE FILTER (바닥 추격 방지) ---
+    distance_from_arena = (arena_now - close_now) / arena_now
+    if distance_from_arena > 0.005:
+        log.debug(f"[DIST_BLOCK] distance={distance_from_arena:.4f}")
+        return ""
+
+    # --- [ADD] TREND FILTER (EMA30 하락만 허용) ---
+    arena_prev = arena.get_prev()
+    if arena_prev is None:
+        return ""
+    if arena_now >= arena_prev:
+        log.debug(f"[TREND_BLOCK] arena not falling")
+        return ""
+
     swing_lookback  = int(CFG["15_SWING_LOOKBACK"])
     slope_threshold = float(CFG["14_SLOPE_THRESHOLD"])
     ref = fast.get_lookback(swing_lookback)
@@ -405,7 +436,11 @@ def short_entry_signals(st: EngineState) -> str:
     tolerance = float(CFG["13_TOUCH_TOLERANCE"])
     if len(st.high_history) < 2 or len(st.close_history) < 1:
         return ""
-    pullback  = st.high_history[-2] >= fast_prev * (1.0 - tolerance)
+    pullback  = (
+        (st.high_history[-2] >= mid_prev) and
+        (fast_now < mid_now) and
+        (mid_now  < arena_now)   # [ADD] 상승장 완전 차단
+    )
     reentry   = st.close_history[-1] < fast_now
     e2_signal = pullback and reentry
 
@@ -436,12 +471,16 @@ def exit_signal(st: EngineState, lot: Dict[str, Decimal]):
     low   = st.low_history[-1]
 
     # ----------------------------------------------------------
-    # [1] SL — 최우선 전량청산
+    # [1] SL — 최우선 전량청산 (BE 활성 시 SL → 본절로 이동)
     # ----------------------------------------------------------
     if CFG["40_SL_ENABLE"]:
         sl = float(CFG["41_SL_PCT"]) / 100.0
-        if close >= pos.entry_price * (1.0 + sl):
-            log.info(f"[EXIT_SL] close={close:.8f} >= SL={pos.entry_price * (1.0 + sl):.8f}")
+        if pos.be_activated:
+            sl_price = pos.entry_price          # BE 활성 → 본절이 SL
+        else:
+            sl_price = pos.entry_price * (1.0 + sl)
+        if close >= sl_price:
+            log.info(f"[EXIT_SL] close={close:.8f} >= SL={sl_price:.8f} be={pos.be_activated}")
             return ("FULL", "SL")
 
     # ----------------------------------------------------------
@@ -504,6 +543,15 @@ def exit_signal(st: EngineState, lot: Dict[str, Decimal]):
                 f"partial={partial_str} remaining={remaining_str} full={pos.qty}"
             )
             return ("PARTIAL", partial_str)
+
+    # ----------------------------------------------------------
+    # [ADD] BREAKEVEN SIGNAL (상태 변경 금지 — 신호만 반환)
+    # TP1 이후 체크 — 수익 실현 우선, BE는 보호 장치
+    # ----------------------------------------------------------
+    if pos.entry_type != "SYNC" and not pos.be_activated:
+        be_trigger = pos.entry_price * (1.0 - 0.006)
+        if close <= be_trigger:
+            return ("BE_ACTIVATE", None)
 
     # ----------------------------------------------------------
     # [5] TRAILING — TP1 이후 잔량 전용 (non-SYNC 포지션만)
@@ -623,6 +671,16 @@ def _apply_bar(st: EngineState, close: float, high: float, low: float) -> None:
     st.ema_arena.trim_history()
     st.ema_exit_fast.trim_history()
     st.ema_exit_mid.trim_history()
+
+    # --- ATR 계산 ---
+    if len(st.close_history) >= 2:
+        prev_close = st.close_history[-2]
+        tr = max(
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close),
+        )
+        st.atr_history.append(tr)
 
 def engine():
     client   = init_client()
@@ -757,9 +815,20 @@ def engine():
                 exit_type, exit_data = exit_signal(st, lot)
 
                 # ----------------------------------------------------------
+                # BREAKEVEN ACTIVATE (상태 변경만, 주문 없음)
+                # ----------------------------------------------------------
+                if exit_type == "BE_ACTIVATE":
+                    if st.position is not None and not st.position.be_activated:
+                        st.position.be_activated = True
+                        log.info(
+                            f"[BE_ACTIVATED] close={st.close_history[-1]:.8f} "
+                            f"entry={st.position.entry_price:.8f} bar={st.bar}"
+                        )
+
+                # ----------------------------------------------------------
                 # FULL EXIT
                 # ----------------------------------------------------------
-                if exit_type == "FULL":
+                elif exit_type == "FULL":
                     ok = place_short_exit(client, symbol, st.position.qty, lot)
                     if ok:
                         log.info(
