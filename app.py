@@ -54,19 +54,19 @@ CFG = {
 
     # ---- 필터 강화 (FROZEN) ----
     "13_TOUCH_TOLERANCE": 0.002,
-    "14_SLOPE_THRESHOLD": 0.006,   # [수정 3] 0.002 → 0.006
+    "14_SLOPE_THRESHOLD": 0.0015,   # 0.006 → 0.003 → 0.002 → 0.0015
     "15_SWING_LOOKBACK": 4,
 
     # ---- ATR FILTER (횡보 차단 전용) ----
     "16_ATR_FILTER_ENABLE": True,
     "17_ATR_PERIOD": 14,
-    "18_ATR_THRESHOLD_PCT": 0.004,
+    "18_ATR_THRESHOLD_PCT": 0.002,   # 0.004 → 0.003 → 0.002
 
     "23_ENTRY2_ENABLE": True,
 
     # ---- EXIT EMA (기존 유지) ----
-    "30_EXIT_FAST_EMA": 6,
-    "31_EXIT_MID_EMA": 10,
+    "30_EXIT_FAST_EMA": 4,
+    "31_EXIT_MID_EMA": 8,
 
     # ---- SL (최우선) ----
     "40_SL_ENABLE": True,
@@ -74,20 +74,20 @@ CFG = {
 
     # ---- TIMEOUT (SYNC 포함 전체 적용) ----
     "50_TIMEOUT_EXIT_ENABLE": True,
-    "51_TIMEOUT_BARS": 18,
+    "51_TIMEOUT_BARS": 12,
 
     # ---- TP1 부분익절 ----
     "60_TP1_ENABLE": True,
-    "61_TP1_PCT": 0.007,          # [수정 4] 0.004 → 0.007
-    "62_TP1_PARTIAL_PCT": 0.50,   # 포지션의 50% 청산
+    "61_TP1_PCT": 0.006,
+    "62_TP1_PARTIAL_PCT": 0.50,
 
     # ---- TRAILING (TP1 이후 잔량 전용 / non-SYNC 만) ----
     "70_TRAIL_ENABLE": True,
-    "71_TRAIL_CALLBACK_PCT": 0.006,  # TP1 0.7%와 균형 맞춤
+    "71_TRAIL_CALLBACK_PCT": 0.006,
 
     "90_KLINE_LIMIT": 1500,
     "91_POLL_SEC": 5,
-    "92_LOG_LEVEL": "INFO",
+    "92_LOG_LEVEL": "DEBUG",   # INFO → DEBUG
 }
 
 # ============================================================
@@ -192,7 +192,7 @@ def normalize_qty_str(qty_str: str, lot: Dict[str, Decimal]) -> Optional[str]:
     return f"{qty:.{precision}f}"
 
 # ============================================================
-# EMA — incremental (옵티 동일 방식)
+# EMA — incremental
 # ============================================================
 
 class IncrementalEMA:
@@ -244,13 +244,9 @@ class Position:
     qty:         str
     entry_bar:   int
     entry_type:  str   = "E1"
-    # ---- TP1 / TRAILING 상태 ----
-    # [규칙] tp1_done 변경은 engine()에서 주문 성공 + 재동기화 후에만 허용
-    # [규칙] tp1_done / qty 변경은 engine()에서 주문 성공 + 재동기화 후에만 허용
-    # [규칙] trail_low 갱신은 exit_signal() 내부 소유 (TRAILING 판단과 일체)
     tp1_done:     bool  = False
-    trail_low:    float = float("inf")   # 숏: 포지션 보유 중 최저가 추적
-    be_activated: bool  = False          # BE 플래그 — SL 이동 전용 (청산 금지)
+    trail_low:    float = float("inf")
+    be_activated: bool  = False
 
 @dataclass
 class EngineState:
@@ -289,7 +285,7 @@ def _warmup_done(st: EngineState) -> bool:
     return st.bar >= needed
 
 # ============================================================
-# 거래소 포지션 재동기화 헬퍼
+# 거래소 포지션 재동기화
 # ============================================================
 
 def sync_short_position_state(
@@ -298,15 +294,6 @@ def sync_short_position_state(
     lot: Dict[str, Decimal],
     st: EngineState,
 ) -> None:
-    """
-    거래소 실제 포지션을 조회하여 로컬 st.position 상태를 맞춘다.
-
-    - positionAmt == 0  → st.position = None
-    - positionAmt < 0   → 실제 SHORT 존재
-        - 기존 st.position 있으면: qty / entry_price만 실제값으로 갱신
-          (side / entry_type / tp1_done / trail_low / entry_bar 유지)
-        - 기존 st.position 없으면: SYNC 포지션으로 신규 생성
-    """
     try:
         positions = client.futures_position_information(symbol=symbol)
         for pos in positions:
@@ -327,7 +314,6 @@ def sync_short_position_state(
                         return
 
                     if st.position is not None:
-                        # 기존 포지션 유지 + qty/entry_price만 실제값으로 갱신
                         old_qty = st.position.qty
                         st.position.qty         = real_qty_str
                         st.position.entry_price = real_entry
@@ -336,14 +322,13 @@ def sync_short_position_state(
                             f"entry_price → {real_entry:.8f}"
                         )
                     else:
-                        # 포지션 없던 상태에서 실제 SHORT 발견 → SYNC 포지션 생성
                         st.position = Position(
                             side="SHORT",
                             entry_price=real_entry,
                             qty=real_qty_str,
                             entry_bar=st.bar,
                             entry_type="SYNC",
-                            tp1_done=True,       # TP1 재시도 금지
+                            tp1_done=True,
                             trail_low=float("inf"),
                         )
                         log.info(
@@ -352,7 +337,6 @@ def sync_short_position_state(
                         )
                     return
 
-        # symbol 없으면 포지션 없는 것으로 처리
         if st.position is not None:
             log.info(f"[RESYNC] symbol not found in positions → st.position=None")
         st.position = None
@@ -361,14 +345,13 @@ def sync_short_position_state(
         log.error(f"[RESYNC] sync_short_position_state failed: {e}")
 
 # ============================================================
-# ENTRY SIGNALS (FROZEN — 절대 수정 금지)
+# ENTRY SIGNALS (FROZEN)
 # ============================================================
 
 def short_entry_signals(st: EngineState) -> str:
     if not _warmup_done(st):
         return ""
 
-    # --- ATR FILTER (횡보 차단) ---
     if CFG["16_ATR_FILTER_ENABLE"]:
         if len(st.atr_history) < CFG["17_ATR_PERIOD"]:
             return ""
@@ -407,17 +390,16 @@ def short_entry_signals(st: EngineState) -> str:
         )
         return ""
 
-    # --- [ADD] DISTANCE FILTER (바닥 추격 방지) ---
+    # DISTANCE FILTER — 0.005 → 0.015 → 0.010
     distance_from_arena = (arena_now - close_now) / arena_now
-    if distance_from_arena > 0.005:
+    if distance_from_arena > 0.010:
         log.debug(f"[DIST_BLOCK] distance={distance_from_arena:.4f}")
         return ""
 
-    # --- [ADD] TREND FILTER (EMA30 하락만 허용) ---
     arena_prev = arena.get_prev()
     if arena_prev is None:
         return ""
-    if arena_now >= arena_prev:
+    if arena_now > arena_prev:   # 상승 시만 차단, 평탄 허용
         log.debug(f"[TREND_BLOCK] arena not falling")
         return ""
 
@@ -439,7 +421,7 @@ def short_entry_signals(st: EngineState) -> str:
     pullback  = (
         (st.high_history[-2] >= mid_prev) and
         (fast_now < mid_now) and
-        (mid_now  < arena_now)   # [ADD] 상승장 완전 차단
+        (mid_now  < arena_now)
     )
     reentry   = st.close_history[-1] < fast_now
     e2_signal = pullback and reentry
@@ -451,16 +433,8 @@ def short_entry_signals(st: EngineState) -> str:
     return ""
 
 # ============================================================
-# EXIT — 확장 구조
+# EXIT
 # ============================================================
-# 반환값:
-#   ("NONE",    None)             → 청산 없음
-#   ("FULL",    reason_str)       → 전량청산
-#   ("PARTIAL", partial_qty_str)  → 부분청산 (TP1)
-#
-# [규칙] exit_signal() 내부에서 pos.tp1_done / pos.qty 변경 금지
-# [규칙] pos.trail_low 갱신은 exit_signal() 내부 소유 — TRAILING 판단과 일체로 처리
-# [규칙] 상태 변경은 engine() 주문 성공 + 재동기화 후에만 허용
 
 def exit_signal(st: EngineState, lot: Dict[str, Decimal]):
     pos = st.position
@@ -470,30 +444,24 @@ def exit_signal(st: EngineState, lot: Dict[str, Decimal]):
     close = st.close_history[-1]
     low   = st.low_history[-1]
 
-    # ----------------------------------------------------------
-    # [1] SL — 최우선 전량청산 (BE 활성 시 SL → 본절로 이동)
-    # ----------------------------------------------------------
+    # [1] SL
     if CFG["40_SL_ENABLE"]:
         sl = float(CFG["41_SL_PCT"]) / 100.0
         if pos.be_activated:
-            sl_price = pos.entry_price          # BE 활성 → 본절이 SL
+            sl_price = pos.entry_price
         else:
             sl_price = pos.entry_price * (1.0 + sl)
         if close >= sl_price:
             log.info(f"[EXIT_SL] close={close:.8f} >= SL={sl_price:.8f} be={pos.be_activated}")
             return ("FULL", "SL")
 
-    # ----------------------------------------------------------
-    # [2] TIMEOUT — 전량청산 (SYNC 포함 모든 포지션)
-    # ----------------------------------------------------------
+    # [2] TIMEOUT
     if CFG["50_TIMEOUT_EXIT_ENABLE"]:
         if (st.bar - pos.entry_bar) >= int(CFG["51_TIMEOUT_BARS"]):
             log.info(f"[EXIT_TIMEOUT] bars={st.bar - pos.entry_bar} entry_type={pos.entry_type}")
             return ("FULL", "TIMEOUT")
 
-    # ----------------------------------------------------------
-    # [3] EMA CROSS — 언제든 전량청산 (상태가 아닌 CROSS 이벤트)
-    # ----------------------------------------------------------
+    # [3] EMA CROSS
     ef = st.ema_exit_fast.get()
     em = st.ema_exit_mid.get()
     if ef is not None and em is not None:
@@ -505,65 +473,46 @@ def exit_signal(st: EngineState, lot: Dict[str, Decimal]):
                 log.info(f"[EXIT_EMA_CROSS] ef={ef:.8f} em={em:.8f} close={close:.8f}")
                 return ("FULL", "EMA_CROSS")
 
-    # ----------------------------------------------------------
-    # [4] TP1 — 1차 부분익절 (non-SYNC + tp1_done=False 일 때만)
-    # ----------------------------------------------------------
+    # [4] TP1
     if CFG["60_TP1_ENABLE"] and not pos.tp1_done and pos.entry_type != "SYNC":
         tp1_pct    = float(CFG["61_TP1_PCT"])
-        tp1_target = pos.entry_price * (1.0 - tp1_pct)   # 숏: 가격 하락이 수익
+        tp1_target = pos.entry_price * (1.0 - tp1_pct)
         if close <= tp1_target:
             partial_ratio = float(CFG["62_TP1_PARTIAL_PCT"])
             qty_full      = Decimal(pos.qty)
             qty_partial   = qty_full * Decimal(str(partial_ratio))
 
-            # ▶ partial_str 계산 (calculate_quantity 유지 — stepSize 규격 보장)
             partial_str = calculate_quantity(qty_partial, lot)
             if partial_str is None:
-                # partial qty 자체가 minQty 미만 → FULL 승격 (dust 방지)
-                log.warning(
-                    f"[TP1_DUST_PREVENT] partial qty < minQty → FULL EXIT upgrade "
-                    f"pos.qty={pos.qty} bar={st.bar}"
-                )
+                log.warning(f"[TP1_DUST_PREVENT] partial qty < minQty → FULL EXIT upgrade")
                 return ("FULL", "TP1_DUST_TO_FULL")
 
-            # ▶ remaining 사전 계산 — PARTIAL 실행 전 dust 검증
             remaining     = qty_full - Decimal(partial_str)
             remaining_str = calculate_quantity(remaining, lot)
             if remaining_str is None:
-                # 잔량 minQty 미만 → 거래소 dust 발생 방지 → FULL 승격
-                log.warning(
-                    f"[TP1_DUST_PREVENT] remaining < minQty → FULL EXIT upgrade "
-                    f"pos.qty={pos.qty} partial={partial_str} bar={st.bar}"
-                )
+                log.warning(f"[TP1_DUST_PREVENT] remaining < minQty → FULL EXIT upgrade")
                 return ("FULL", "TP1_DUST_TO_FULL")
 
-            # ▶ 정상 PARTIAL 반환 (tp1_done 변경 금지 — engine()에서 처리)
             log.info(
                 f"[EXIT_TP1] close={close:.8f} <= target={tp1_target:.8f} "
                 f"partial={partial_str} remaining={remaining_str} full={pos.qty}"
             )
             return ("PARTIAL", partial_str)
 
-    # ----------------------------------------------------------
-    # [ADD] BREAKEVEN SIGNAL (상태 변경 금지 — 신호만 반환)
-    # TP1 이후 체크 — 수익 실현 우선, BE는 보호 장치
-    # ----------------------------------------------------------
+    # BE ACTIVATE
     if pos.entry_type != "SYNC" and not pos.be_activated:
         be_trigger = pos.entry_price * (1.0 - 0.006)
         if close <= be_trigger:
             return ("BE_ACTIVATE", None)
 
-    # ----------------------------------------------------------
-    # [5] TRAILING — TP1 이후 잔량 전용 (non-SYNC 포지션만)
-    # ----------------------------------------------------------
+    # [5] TRAILING
     if CFG["70_TRAIL_ENABLE"] and pos.tp1_done and pos.entry_type != "SYNC":
-        # 최저가 갱신 (trail_low 소유권은 exit_signal 내부)
         if low < pos.trail_low:
             pos.trail_low = low
             log.debug(f"[TRAIL_LOW_UPDATE] trail_low={pos.trail_low:.8f}")
 
         trail_pct  = float(CFG["71_TRAIL_CALLBACK_PCT"])
-        trail_stop = pos.trail_low * (1.0 + trail_pct)   # 최저가에서 +N% 반등 시 청산
+        trail_stop = pos.trail_low * (1.0 + trail_pct)
         if close >= trail_stop:
             log.info(
                 f"[EXIT_TRAIL] close={close:.8f} >= trail_stop={trail_stop:.8f} "
@@ -585,11 +534,6 @@ def _sync_with_retry(
     retries: int = 3,
     delay: float = 0.5,
 ) -> None:
-    """
-    sync_short_position_state() 를 최대 retries 회 재시도한다.
-    체결 반영 지연(바이낸스 0.5~1초) 대비용.
-    매 시도 사이 delay 초 대기.
-    """
     for attempt in range(1, retries + 1):
         time.sleep(delay)
         sync_short_position_state(client, symbol, lot, st)
@@ -598,13 +542,7 @@ def _sync_with_retry(
             f"position={'exists qty=' + st.position.qty if st.position else 'None'}"
         )
 
-
 def place_short_entry(client: "Client", symbol: str, capital_usdt: float, lot: Dict[str, Decimal]) -> Optional[str]:
-    """
-    시장가 SHORT 진입 주문.
-    반환값: 주문에 사용한 qty_str (성공 시) / None (실패 시)
-    entry_price 는 주문 후 sync_short_position_state() 로 실제값 확정.
-    """
     try:
         ticker   = client.futures_symbol_ticker(symbol=symbol)
         price    = float(ticker["price"])
@@ -672,7 +610,6 @@ def _apply_bar(st: EngineState, close: float, high: float, low: float) -> None:
     st.ema_exit_fast.trim_history()
     st.ema_exit_mid.trim_history()
 
-    # --- ATR 계산 ---
     if len(st.close_history) >= 2:
         prev_close = st.close_history[-2]
         tr = max(
@@ -696,8 +633,6 @@ def engine():
 
     st = EngineState()
 
-    # ---- 시작 시 포지션 SYNC ----
-    # SYNC 포지션 정책: TP1/TRAILING 없음, SL+EMA_CROSS+TIMEOUT 만
     sync_short_position_state(client, symbol, lot, st)
     if st.position is not None:
         log.info(
@@ -710,6 +645,7 @@ def engine():
         f"lev={CFG['04_LEVERAGE']} "
         f"| ENTRY_EMA=({CFG['10_EMA_FAST']},{CFG['11_EMA_MID']},{CFG['12_EMA_ARENA']}) "
         f"| EXIT_EMA=({CFG['30_EXIT_FAST_EMA']},{CFG['31_EXIT_MID_EMA']}) "
+        f"| SLOPE={CFG['14_SLOPE_THRESHOLD']} ATR={CFG['18_ATR_THRESHOLD_PCT']} "
         f"| TP1={CFG['61_TP1_PCT']*100:.2f}%x{CFG['62_TP1_PARTIAL_PCT']*100:.0f}% "
         f"| TRAIL={CFG['71_TRAIL_CALLBACK_PCT']*100:.2f}%"
     )
@@ -741,7 +677,6 @@ def engine():
 
             _apply_bar(st, float(completed[4]), float(completed[2]), float(completed[3]))
 
-            # ▶ ARENA 로그
             if st.ema_fast.ready and st.ema_mid.ready and st.ema_arena.ready and st.close_history:
                 close_now   = st.close_history[-1]
                 arena_now   = st.ema_arena.get()
@@ -765,13 +700,8 @@ def engine():
                 if entry_type:
                     qty_str = place_short_entry(client, symbol, capital, lot)
                     if qty_str:
-                        # 주문 성공 → retry sync 로 실제 entry_price / qty 확정
-                        # (ticker 현재가가 아닌 실제 체결 평균가 사용)
-                        # sleep(0.5) x 3회 retry — 바이낸스 체결 반영 지연 대비
                         _sync_with_retry(client, symbol, lot, st, retries=3, delay=0.5)
                         if st.position is not None:
-                            # sync가 SYNC entry_type으로 생성하므로 실제 entry_type 복원
-                            # tp1_done=False 초기화 필수 — sync가 True로 만들기 때문
                             st.position.entry_type = entry_type
                             st.position.entry_bar  = st.bar
                             st.position.tp1_done   = False
@@ -780,10 +710,6 @@ def engine():
                                 f"entry={st.position.entry_price:.8f} bar={st.bar}"
                             )
                         else:
-                            # sync 실패 — 거래소에 포지션 있을 수 있음
-                            # 다음 바 루프 진입 시 st.position=None 상태이므로
-                            # ENTRY 신호가 다시 발생할 수 있음 → 이중 진입 방지를 위해
-                            # 한 번 더 즉시 재조회 시도
                             log.error(
                                 f"[ENTRY_SYNC_FAIL] position not found after 3 retries "
                                 f"qty={qty_str} bar={st.bar} → immediate re-sync"
@@ -814,9 +740,6 @@ def engine():
 
                 exit_type, exit_data = exit_signal(st, lot)
 
-                # ----------------------------------------------------------
-                # BREAKEVEN ACTIVATE (상태 변경만, 주문 없음)
-                # ----------------------------------------------------------
                 if exit_type == "BE_ACTIVATE":
                     if st.position is not None and not st.position.be_activated:
                         st.position.be_activated = True
@@ -825,9 +748,6 @@ def engine():
                             f"entry={st.position.entry_price:.8f} bar={st.bar}"
                         )
 
-                # ----------------------------------------------------------
-                # FULL EXIT
-                # ----------------------------------------------------------
                 elif exit_type == "FULL":
                     ok = place_short_exit(client, symbol, st.position.qty, lot)
                     if ok:
@@ -835,28 +755,18 @@ def engine():
                             f"[EXIT_FULL] reason={exit_data} type={st.position.entry_type} "
                             f"close={st.close_history[-1]:.8f} entry={st.position.entry_price:.8f} bar={st.bar}"
                         )
-                        # 주문 성공 후 retry sync — 부분체결 / 수량차 가능성 대비
                         _sync_with_retry(client, symbol, lot, st, retries=3, delay=0.5)
                     else:
                         log.error(f"[EXIT_FULL_FAIL] reason={exit_data} order failed → resync")
                         sync_short_position_state(client, symbol, lot, st)
 
-                # ----------------------------------------------------------
-                # PARTIAL EXIT (TP1)
-                # ----------------------------------------------------------
                 elif exit_type == "PARTIAL":
                     partial_qty = exit_data
                     ok = place_short_exit(client, symbol, partial_qty, lot)
                     if ok:
-                        log.info(
-                            f"[EXIT_TP1_ORDER_OK] partial={partial_qty} bar={st.bar} → resync"
-                        )
-                        # 주문 성공 후 retry sync — 실제 잔량으로 qty 확정
+                        log.info(f"[EXIT_TP1_ORDER_OK] partial={partial_qty} bar={st.bar} → resync")
                         _sync_with_retry(client, symbol, lot, st, retries=3, delay=0.5)
-
                         if st.position is not None:
-                            # 실제 잔량 존재 확인 후에만 tp1_done=True 설정
-                            # [규칙] tp1_done=True: partial 성공 + 재동기화 후 실제 잔량 확인 시에만
                             st.position.tp1_done  = True
                             st.position.trail_low = st.low_history[-1]
                             log.info(
@@ -864,40 +774,21 @@ def engine():
                                 f"trail_low_init={st.position.trail_low:.8f} bar={st.bar}"
                             )
                         else:
-                            # 재조회 결과 포지션 없음 → 전량 청산 완료로 처리
                             log.info(f"[EXIT_TP1] position fully closed after resync bar={st.bar}")
-
                     else:
-                        # TP1 partial 주문 실패
-                        # [규칙] 주문 실패 시 tp1_done 절대 변경 금지
-                        log.error(
-                            f"[EXIT_TP1_FAIL] partial order failed partial={partial_qty} → resync + force FULL"
-                        )
-                        # 즉시 재조회 — 실제로 주문이 들어갔을 수도 있음
+                        log.error(f"[EXIT_TP1_FAIL] partial order failed partial={partial_qty} → resync + force FULL")
                         sync_short_position_state(client, symbol, lot, st)
-
                         if st.position is not None:
-                            # 포지션 살아있음 → 전량청산 강제 시도
-                            log.error(
-                                f"[EXIT_TP1_FAIL] position still alive → force FULL exit qty={st.position.qty}"
-                            )
+                            log.error(f"[EXIT_TP1_FAIL] position still alive → force FULL exit qty={st.position.qty}")
                             ok2 = place_short_exit(client, symbol, st.position.qty, lot)
                             if ok2:
-                                log.info(
-                                    f"[EXIT_TP1_FORCE_FULL] qty={st.position.qty} "
-                                    f"close={st.close_history[-1]:.8f} bar={st.bar}"
-                                )
+                                log.info(f"[EXIT_TP1_FORCE_FULL] qty={st.position.qty} close={st.close_history[-1]:.8f} bar={st.bar}")
                                 _sync_with_retry(client, symbol, lot, st, retries=3, delay=0.5)
                             else:
-                                log.error(
-                                    "[EXIT_TP1_FORCE_FULL_FAIL] force full also failed → resync, will retry next bar"
-                                )
+                                log.error("[EXIT_TP1_FORCE_FULL_FAIL] force full also failed → resync, will retry next bar")
                                 sync_short_position_state(client, symbol, lot, st)
                         else:
-                            # 재조회 결과 포지션 없음 → partial이 실제로는 성공했던 것
-                            log.info(
-                                f"[EXIT_TP1_FAIL_BUT_CLOSED] position already closed after resync bar={st.bar}"
-                            )
+                            log.info(f"[EXIT_TP1_FAIL_BUT_CLOSED] position already closed after resync bar={st.bar}")
 
         except Exception as e:
             log.error(f"engine loop error: {e}")
