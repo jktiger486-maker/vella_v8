@@ -65,7 +65,7 @@ CFG = {
     "23_ENTRY2_ENABLE": True,
 
     # ---- EXIT EMA (기존 유지) ----
-    "30_EXIT_FAST_EMA": 4,
+    "30_EXIT_FAST_EMA": 5,
     "31_EXIT_MID_EMA": 8,
 
     # ---- SL (최우선) ----
@@ -87,7 +87,7 @@ CFG = {
 
     "90_KLINE_LIMIT": 1500,
     "91_POLL_SEC": 5,
-    "92_LOG_LEVEL": "DEBUG",   # INFO → DEBUG
+    "92_LOG_LEVEL": "INFO",
 }
 
 # ============================================================
@@ -100,6 +100,8 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("VELLA_BR8_SHORT")
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
 
 # ============================================================
 # BINANCE
