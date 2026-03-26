@@ -42,7 +42,7 @@ from collections import deque
 # ============================================================
 
 CFG = {
-    "01_TRADE_SYMBOL": "OPUSDT",
+    "01_TRADE_SYMBOL": "POLYXUSDT",
     "02_INTERVAL": "5m",
     "03_CAPITAL_BASE_USDT": 10.0,
     "04_LEVERAGE": 1,
@@ -52,15 +52,15 @@ CFG = {
     "11_EMA_MID": 14,
     "12_EMA_ARENA": 34,
 
-    # ---- 필터 강화 (FROZEN) ----
+    # ---- 필터 강화 (수정) ----
     "13_TOUCH_TOLERANCE": 0.002,
-    "14_SLOPE_THRESHOLD": 0.003,   # 0.006 → 0.003 → 0.002 → 0.0015
+    "14_SLOPE_THRESHOLD": 0.001,   # 0.003 → 0.001 완화
     "15_SWING_LOOKBACK": 6,
 
     # ---- ATR FILTER (횡보 차단 전용) ----
-    "16_ATR_FILTER_ENABLE": False,
+    "16_ATR_FILTER_ENABLE": True,  # False → True
     "17_ATR_PERIOD": 14,
-    "18_ATR_THRESHOLD_PCT": 0.002,   # 0.004 → 0.003 → 0.002
+    "18_ATR_THRESHOLD_PCT": 0.003, # 0.002 → 0.003 강화
 
     "23_ENTRY2_ENABLE": True,
 
@@ -162,6 +162,45 @@ def get_futures_lot_size(client: "Client", symbol: str) -> Optional[Dict[str, De
     except Exception as e:
         log.error(f"get_futures_lot_size: {e}")
         return None
+
+# ============================================================
+# 4H HTF 필터
+# ============================================================
+
+def calc_ema_series(values: List[float], period: int) -> Optional[float]:
+    if values is None or len(values) < period:
+        return None
+    ema = sum(values[:period]) / period
+    k = 2.0 / (period + 1)
+    for price in values[period:]:
+        ema = price * k + ema * (1.0 - k)
+    return ema
+
+
+def is_4h_bear_and_below_ema20(symbol: str) -> bool:
+    """
+    4시간봉 현재 진행 중 캔들 기준:
+    1) 현재 진행 중 캔들이 음봉(close < open)
+    2) 현재가(close)가 4H EMA20 아래
+    둘 다 만족하면 True
+    """
+    kl = fetch_klines_futures(symbol, "4h", 100)
+    if not kl or len(kl) < 20:
+        return False
+
+    closes = [float(k[4]) for k in kl]
+    ema20 = calc_ema_series(closes, 20)
+    if ema20 is None:
+        return False
+
+    current = kl[-1]   # 진행 중 4H 봉
+    open_4h  = float(current[1])
+    close_4h = float(current[4])
+
+    bear_now    = close_4h < open_4h
+    below_ema20 = close_4h < ema20
+
+    return bear_now and below_ema20
 
 # ============================================================
 # QTY (str 통일)
@@ -392,9 +431,9 @@ def short_entry_signals(st: EngineState) -> str:
         )
         return ""
 
-    # DISTANCE FILTER — 0.005 → 0.015 → 0.010
+    # DISTANCE FILTER — 0.010 → 0.005 강화
     distance_from_arena = (arena_now - close_now) / arena_now
-    if distance_from_arena > 0.010:
+    if distance_from_arena > 0.005:
         log.debug(f"[DIST_BLOCK] distance={distance_from_arena:.4f}")
         return ""
 
@@ -647,6 +686,7 @@ def engine():
         f"lev={CFG['04_LEVERAGE']} "
         f"| ENTRY_EMA=({CFG['10_EMA_FAST']},{CFG['11_EMA_MID']},{CFG['12_EMA_ARENA']}) "
         f"| EXIT_EMA=({CFG['30_EXIT_FAST_EMA']},{CFG['31_EXIT_MID_EMA']}) "
+        f"| HTF=4H_BEAR+EMA20 "
         f"| SLOPE={CFG['14_SLOPE_THRESHOLD']} ATR={CFG['18_ATR_THRESHOLD_PCT']} "
         f"| TP1={CFG['61_TP1_PCT']*100:.2f}%x{CFG['62_TP1_PARTIAL_PCT']*100:.0f}% "
         f"| TRAIL={CFG['71_TRAIL_CALLBACK_PCT']*100:.2f}%"
@@ -698,7 +738,12 @@ def engine():
             # ENTRY
             # ============================================================
             if st.position is None:
-                entry_type = short_entry_signals(st)
+                if not is_4h_bear_and_below_ema20(symbol):
+                    log.debug("[HTF_BLOCK] 4H not bear_or_not_below_ema20")
+                    entry_type = ""
+                else:
+                    entry_type = short_entry_signals(st)
+
                 if entry_type:
                     qty_str = place_short_entry(client, symbol, capital, lot)
                     if qty_str:
