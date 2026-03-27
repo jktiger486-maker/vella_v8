@@ -1,847 +1,1003 @@
-# ============================================================
-# VELLA_BR8 — SHORT ENGINE  (최종 안정화 / 재동기화 중심)
-# ENTRY LOGIC FROZEN / EXIT EXPANDED + RESYNC
-#
-# EXIT 우선순위:
-#   [1] SL       — 최우선 전량청산
-#   [2] TIMEOUT  — 전량청산 (SYNC 포함)
-#   [3] EMA CROSS — CROSS 이벤트 전량청산
-#   [4] TP1      — 부분익절 (non-SYNC 포지션만, 1회)
-#   [5] TRAILING — TP1 이후 잔량 전용 (non-SYNC 포지션만)
-#
-# 재동기화 원칙:
-#   - ENTRY 주문 성공 후  → sync_short_position_state() 로 실제 entry_price/qty 확정
-#   - FULL EXIT 성공 후   → sync 후 포지션 0이면 None, 잔량 있으면 반영
-#   - PARTIAL EXIT 성공 후→ sync 후 실제 잔량으로 qty 확정, tp1_done=True 설정
-#   - 주문 실패 후        → 즉시 sync 로 로컬-거래소 불일치 최소화
-#
-# SYNC 포지션 정책:
-#   - TP1 없음 / TRAILING 없음
-#   - SL + EMA_CROSS + TIMEOUT 만 허용
-#   - tp1_done=True 고정 (TP1 재시도 방지)
-#
-# 상태 변경 원칙:
-#   - exit_signal() 내부에서 tp1_done / qty 변경 금지
-#   - trail_low 갱신은 exit_signal() 내부 소유 (TRAILING 판단과 일체)
-#   - 상태 변경은 주문 성공 후 + 재동기화 결과 기준으로만
-# ============================================================
+"""
+============================================================
+VELLA RANGE SHORT LADDER v8_거미줄 작전
+============================================================
+v8 대비 단일 패치:
+- cancel_buy_exit_orders를 인스턴스 메서드로 전환
+- 모든 BUY exit cancel을 _safe_cancel()로 일원화
+- FILLED / 이미 취소된 BUY exit 주문 재cancel 방지
 
-import os
-import sys
+[추가 패치]
+- 트리거: 1H → 15M EMA15 하향돌파
+- 1차 진입: 시장가 즉시 체결 (2~10차는 지정가 유지)
+- LADDER_ACTIVE 미체결 타임아웃: 5M 12봉 체결 0개 시 철거→WATCHING
+
+EXIT 우선순위:
+  1. HARD SL
+  2. TIMEOUT
+  3. TP1 0.8% → 50% 부분청산 성공 후 SELL ladder 취소 → 트레일링 전환
+  4. TRAIL EXIT: 저점 추적 → +1% 반등 시 전량 청산
+  ※ TP1 전: 지정가 EXIT 병행
+  ※ TP1 후: 트레일링 EXIT 전용
+
+상태 머신:
+  WATCHING       — 포지션 없음. 4H 필터 + 15M 트리거 대기.
+  LADDER_ACTIVE  — 거미줄 배치 완료. 체결 및 무효화 감시.
+  POSITION_HOLD  — 포지션 존재. EXIT 동기화 및 강제종료 관리.
+  COOLDOWN       — 청산 완료 후 재진입 금지 대기.
+
+역할 분리:
+  4H FILTER   — 숏 허용 여부만 판단 (close < EMA15)
+  5M TRIGGER  — EMA15 역전 감지 (close[-1]<EMA15 + high[-2]>EMA15 + close[-1]<close[-2], 완료봉 기준)
+  5M MGMT     — 체결 추적 / 타임아웃 / 쿨다운 / EXIT 동기화
+
+재시작 sync:
+  A: 포지션 있음              → POSITION_HOLD, tp1_done=True, trail_low=None
+  B: 포지션 없음 + SELL 주문  → LADDER_ACTIVE, min(price)=entry_price_base
+  C: 포지션 없음 + 주문 없음  → WATCHING
+============================================================
+"""
+
 import time
-import signal
 import logging
-import requests
+import os
 from decimal import Decimal, ROUND_DOWN
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List, Deque
-from collections import deque
+try:
+    from binance.client import Client
+    from binance.exceptions import BinanceAPIException, BinanceOrderException
+except Exception:
+    Client = None
+    BinanceAPIException = Exception
+    BinanceOrderException = Exception
+
+ClientError = (BinanceAPIException, BinanceOrderException)
 
 # ============================================================
 # CFG
 # ============================================================
-
 CFG = {
-    "01_TRADE_SYMBOL": "POLYXUSDT",
-    "02_INTERVAL": "5m",
-    "03_CAPITAL_BASE_USDT": 10.0,
-    "04_LEVERAGE": 1,
+    "SYMBOL":              "TIAUSDT",
+    "INTERVAL_TRIGGER":    "5m",        # 1h → 15m → 5m 변경
+    "INTERVAL_EXEC":       "5m",
+    "INTERVAL_FILTER_HTF": "4h",
+    "EMA_TRIGGER_LEN":     15,
 
-    # ---- ENTRY EMA (FROZEN) ----
-    "10_EMA_FAST": 6,
-    "11_EMA_MID": 14,
-    "12_EMA_ARENA": 34,
+    "HTF_FILTER_EMA_LEN": 15,
+    "HTF_FILTER_ENABLE":  True,
 
-    # ---- 필터 강화 (수정) ----
-    "13_TOUCH_TOLERANCE": 0.002,
-    "14_SLOPE_THRESHOLD": 0.001,   # 0.003 → 0.001 완화
-    "15_SWING_LOOKBACK": 6,
+    "TOTAL_CAPITAL_USDT": 2000.0,
+    "LEVERAGE":           1,
+    "MAX_CAPITAL_RATIO":  0.95,
 
-    # ---- ATR FILTER (횡보 차단 전용) ----
-    "16_ATR_FILTER_ENABLE": True,  # False → True
-    "17_ATR_PERIOD": 14,
-    "18_ATR_THRESHOLD_PCT": 0.003, # 0.002 → 0.003 강화
+    "LADDER_COUNT":   10,
+    "LADDER_GAP_PCT": 0.01,
+    "SIZE_WEIGHTS": [
+        1.5, 1.4, 1.3, 1.2, 1.1,
+        1.0, 0.9, 0.8, 0.7, 0.6
+    ],
 
-    "23_ENTRY2_ENABLE": True,
+    "LADDER_INVALIDATION_MULT": 2.0,
 
-    # ---- EXIT EMA (기존 유지) ----
-    "30_EXIT_FAST_EMA": 6,
-    "31_EXIT_MID_EMA": 11,
+    "TP1_PROFIT_PCT":       0.008,
+    "TP1_PARTIAL_RATIO":    0.5,
+    "TRAILING_REBOUND_PCT": 0.01,
 
-    # ---- SL (최우선) ----
-    "40_SL_ENABLE": True,
-    "41_SL_PCT": 0.8,
+    "FEE_PCT_ONEWAY":           0.0004,
+    "TARGET_PROFIT_STAGE_1_3":  0.004,
+    "TARGET_PROFIT_STAGE_4_7":  0.0020,
+    "TARGET_PROFIT_STAGE_8_10": -0.0010,
+    "EXIT_REPRICE_THRESHOLD_PCT": 0.003,
 
-    # ---- TIMEOUT (SYNC 포함 전체 적용) ----
-    "50_TIMEOUT_EXIT_ENABLE": True,
-    "51_TIMEOUT_BARS": 12,
+    "DEEP_FILL_STAGE":         8,
+    "TIMEOUT_BARS_AFTER_DEEP": 12,
+    "HARD_SL_PCT":             0.08,
 
-    # ---- TP1 부분익절 ----
-    "60_TP1_ENABLE": True,
-    "61_TP1_PCT": 0.006,
-    "62_TP1_PARTIAL_PCT": 0.50,
+    "LADDER_NO_FILL_TIMEOUT_BARS": 12,  # 신규: 미체결 타임아웃 5M 12봉
 
-    # ---- TRAILING (TP1 이후 잔량 전용 / non-SYNC 만) ----
-    "70_TRAIL_ENABLE": True,
-    "71_TRAIL_CALLBACK_PCT": 0.006,
-
-    "90_KLINE_LIMIT": 1500,
-    "91_POLL_SEC": 5,
-    "92_LOG_LEVEL": "INFO",
+    "REENTRY_COOLDOWN_BARS":      8,
+    "POLL_INTERVAL_SEC":          10,
+    "BAR_CHECK_MIN_INTERVAL_SEC": 40,
+    "LOG_LEVEL": "INFO",
 }
 
 # ============================================================
-# LOGGING
+# 로거
 # ============================================================
-
 logging.basicConfig(
-    level=getattr(logging, CFG["92_LOG_LEVEL"], logging.INFO),
+    level=getattr(logging, CFG["LOG_LEVEL"]),
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("vella_range_short_v8.log", encoding="utf-8"),
+    ]
 )
-log = logging.getLogger("VELLA_BR8_SHORT")
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("requests").setLevel(logging.WARNING)
+log = logging.getLogger("VELLA_RS9")
 
 # ============================================================
-# BINANCE
+# 클라이언트 (BR9 python-binance 호환 어댑터)
 # ============================================================
+API_KEY    = os.environ.get("BINANCE_API_KEY", "")
+API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
 
-try:
-    from binance.client import Client
-    from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET
-except Exception:
-    Client = None
-    SIDE_BUY = "BUY"
-    SIDE_SELL = "SELL"
-    ORDER_TYPE_MARKET = "MARKET"
+if Client is None:
+    raise RuntimeError("python-binance missing")
 
-BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 
-def init_client() -> "Client":
-    if Client is None:
-        raise RuntimeError("python-binance missing")
-    api_key = os.getenv("BINANCE_API_KEY")
-    api_secret = os.getenv("BINANCE_API_SECRET")
-    if not api_key or not api_secret:
-        raise RuntimeError("Missing BINANCE_API_KEY / BINANCE_API_SECRET")
-    return Client(api_key, api_secret)
+class BinanceFuturesCompat:
+    def __init__(self, key: str, secret: str):
+        self._client = Client(key, secret)
 
-def set_leverage(client: "Client", symbol: str, leverage: int) -> None:
-    try:
-        client.futures_change_leverage(symbol=symbol, leverage=leverage)
-    except Exception as e:
-        log.error(f"set_leverage failed: {e}")
+    def exchange_info(self):
+        return self._client.futures_exchange_info()
 
-def fetch_klines_futures(symbol: str, interval: str, limit: int) -> Optional[List[Any]]:
-    try:
-        r = requests.get(
-            BINANCE_FUTURES_KLINES,
-            params={"symbol": symbol, "interval": interval, "limit": limit},
-            timeout=5,
-        )
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        log.error(f"fetch_klines_futures: {e}")
-        return None
-
-def get_futures_lot_size(client: "Client", symbol: str) -> Optional[Dict[str, Decimal]]:
-    try:
-        info = client.futures_exchange_info()
-        for s in info["symbols"]:
-            if s["symbol"] == symbol:
-                for f in s["filters"]:
-                    if f["filterType"] == "LOT_SIZE":
-                        return {
-                            "stepSize": Decimal(f["stepSize"]),
-                            "minQty":   Decimal(f["minQty"]),
-                            "maxQty":   Decimal(f["maxQty"]),
-                        }
-        return None
-    except Exception as e:
-        log.error(f"get_futures_lot_size: {e}")
-        return None
-
-# ============================================================
-# 4H HTF 필터
-# ============================================================
-
-def calc_ema_series(values: List[float], period: int) -> Optional[float]:
-    if values is None or len(values) < period:
-        return None
-    ema = sum(values[:period]) / period
-    k = 2.0 / (period + 1)
-    for price in values[period:]:
-        ema = price * k + ema * (1.0 - k)
-    return ema
-
-
-def is_4h_bear_and_below_ema20(symbol: str) -> bool:
-    """
-    4시간봉 현재 진행 중 캔들 기준:
-    1) 현재 진행 중 캔들이 음봉(close < open)
-    2) 현재가(close)가 4H EMA20 아래
-    둘 다 만족하면 True
-    """
-    kl = fetch_klines_futures(symbol, "4h", 100)
-    if not kl or len(kl) < 20:
-        return False
-
-    closes = [float(k[4]) for k in kl]
-    ema20 = calc_ema_series(closes, 20)
-    if ema20 is None:
-        return False
-
-    current = kl[-1]   # 진행 중 4H 봉
-    open_4h  = float(current[1])
-    close_4h = float(current[4])
-
-    bear_now    = close_4h < open_4h
-    below_ema20 = close_4h < ema20
-
-    return bear_now and below_ema20
-
-# ============================================================
-# QTY (str 통일)
-# ============================================================
-
-def calculate_quantity(qty_raw, lot: Dict[str, Decimal]) -> Optional[str]:
-    if lot is None:
-        return None
-    qty_decimal = Decimal(str(qty_raw))
-    step = lot["stepSize"]
-    qty  = (qty_decimal / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
-    if qty < lot["minQty"]:
-        return None
-    if qty > lot["maxQty"]:
-        qty = lot["maxQty"]
-    precision = abs(step.as_tuple().exponent)
-    return f"{qty:.{precision}f}"
-
-def normalize_qty_str(qty_str: str, lot: Dict[str, Decimal]) -> Optional[str]:
-    if lot is None:
-        return None
-    qty_decimal = Decimal(qty_str)
-    step = lot["stepSize"]
-    qty  = (qty_decimal / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
-    if qty < lot["minQty"]:
-        return None
-    if qty > lot["maxQty"]:
-        qty = lot["maxQty"]
-    precision = abs(step.as_tuple().exponent)
-    return f"{qty:.{precision}f}"
-
-# ============================================================
-# EMA — incremental
-# ============================================================
-
-class IncrementalEMA:
-    def __init__(self, period: int):
-        self.period  = period
-        self.k       = 2.0 / (period + 1)
-        self.value   = None
-        self.ready   = False
-        self._buf: List[float] = []
-        self._history: Deque[float] = deque()
-
-    def update(self, price: float) -> None:
-        if not self.ready:
-            self._buf.append(price)
-            if len(self._buf) >= self.period:
-                self.value = sum(self._buf) / len(self._buf)
-                self.ready = True
-                self._buf  = []
-        else:
-            self.value = price * self.k + self.value * (1.0 - self.k)
-        if self.ready:
-            self._history.append(self.value)
-
-    def get(self) -> Optional[float]:
-        return self.value if self.ready else None
-
-    def get_prev(self) -> Optional[float]:
-        if len(self._history) >= 2:
-            return self._history[-2]
-        return None
-
-    def get_lookback(self, n: int) -> Optional[float]:
-        if len(self._history) > n:
-            return self._history[-(n + 1)]
-        return None
-
-    def trim_history(self, maxlen: int = 2100) -> None:
-        while len(self._history) > maxlen:
-            self._history.popleft()
-
-# ============================================================
-# STATE
-# ============================================================
-
-@dataclass
-class Position:
-    side:        str
-    entry_price: float
-    qty:         str
-    entry_bar:   int
-    entry_type:  str   = "E1"
-    tp1_done:     bool  = False
-    trail_low:    float = float("inf")
-    be_activated: bool  = False
-
-@dataclass
-class EngineState:
-    bar:            int            = 0
-    last_open_time: Optional[int]  = None
-    position:       Optional[Position] = None
-
-    close_history: Deque[float] = field(default_factory=lambda: deque(maxlen=2000))
-    high_history:  Deque[float] = field(default_factory=lambda: deque(maxlen=2000))
-    low_history:   Deque[float] = field(default_factory=lambda: deque(maxlen=2000))
-    atr_history:   Deque[float] = field(default_factory=lambda: deque(maxlen=200))
-
-    ema_fast:      IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["10_EMA_FAST"]))
-    ema_mid:       IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["11_EMA_MID"]))
-    ema_arena:     IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["12_EMA_ARENA"]))
-    ema_exit_fast: IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["30_EXIT_FAST_EMA"]))
-    ema_exit_mid:  IncrementalEMA = field(default_factory=lambda: IncrementalEMA(CFG["31_EXIT_MID_EMA"]))
-
-    prev_arena_state: Optional[bool] = None
-
-# ============================================================
-# WARMUP
-# ============================================================
-
-def _warmup_done(st: EngineState) -> bool:
-    swing  = int(CFG["15_SWING_LOOKBACK"])
-    needed = max(
-        CFG["10_EMA_FAST"],
-        CFG["11_EMA_MID"],
-        CFG["12_EMA_ARENA"],
-        CFG["30_EXIT_FAST_EMA"],
-        CFG["31_EXIT_MID_EMA"],
-        swing + 2,
-        62,
-    )
-    return st.bar >= needed
-
-# ============================================================
-# 거래소 포지션 재동기화
-# ============================================================
-
-def sync_short_position_state(
-    client: "Client",
-    symbol: str,
-    lot: Dict[str, Decimal],
-    st: EngineState,
-) -> None:
-    try:
-        positions = client.futures_position_information(symbol=symbol)
-        for pos in positions:
-            if pos["symbol"] == symbol:
-                position_amt = float(pos["positionAmt"])
-                real_entry   = float(pos["entryPrice"])
-
-                if position_amt == 0:
-                    if st.position is not None:
-                        log.info(f"[RESYNC] positionAmt=0 → st.position=None")
-                    st.position = None
-                    return
-
-                if position_amt < 0:
-                    real_qty_str = calculate_quantity(abs(position_amt), lot)
-                    if real_qty_str is None:
-                        log.error(f"[RESYNC] qty calculation failed for positionAmt={position_amt}")
-                        return
-
-                    if st.position is not None:
-                        old_qty = st.position.qty
-                        st.position.qty         = real_qty_str
-                        st.position.entry_price = real_entry
-                        log.info(
-                            f"[RESYNC] SHORT qty {old_qty} → {real_qty_str} "
-                            f"entry_price → {real_entry:.8f}"
-                        )
-                    else:
-                        st.position = Position(
-                            side="SHORT",
-                            entry_price=real_entry,
-                            qty=real_qty_str,
-                            entry_bar=st.bar,
-                            entry_type="SYNC",
-                            tp1_done=True,
-                            trail_low=float("inf"),
-                        )
-                        log.info(
-                            f"[RESYNC] NEW SYNC SHORT detected qty={real_qty_str} "
-                            f"entry={real_entry:.8f} tp1_done=True(safe_mode)"
-                        )
-                    return
-
-        if st.position is not None:
-            log.info(f"[RESYNC] symbol not found in positions → st.position=None")
-        st.position = None
-
-    except Exception as e:
-        log.error(f"[RESYNC] sync_short_position_state failed: {e}")
-
-# ============================================================
-# ENTRY SIGNALS (FROZEN)
-# ============================================================
-
-def short_entry_signals(st: EngineState) -> str:
-    if not _warmup_done(st):
-        return ""
-
-    if CFG["16_ATR_FILTER_ENABLE"]:
-        if len(st.atr_history) < CFG["17_ATR_PERIOD"]:
-            return ""
-        atr = sum(list(st.atr_history)[-CFG["17_ATR_PERIOD"]:]) / CFG["17_ATR_PERIOD"]
-        atr_pct = atr / st.close_history[-1]
-        if atr_pct < CFG["18_ATR_THRESHOLD_PCT"]:
-            log.debug(f"[ATR_BLOCK] atr_pct={atr_pct:.4f}")
-            return ""
-
-    fast  = st.ema_fast
-    mid   = st.ema_mid
-    arena = st.ema_arena
-
-    if not (fast.ready and mid.ready and arena.ready):
-        return ""
-
-    fast_now  = fast.get()
-    fast_prev = fast.get_prev()
-    mid_now   = mid.get()
-    mid_prev  = mid.get_prev()
-    arena_now = arena.get()
-
-    if fast_prev is None or mid_prev is None:
-        return ""
-
-    close_now   = st.close_history[-1]
-    short_arena = (
-        (close_now < arena_now) and
-        (fast_now  < arena_now) and
-        (mid_now   < arena_now)
-    )
-    if not short_arena:
-        log.debug(
-            f"[ARENA_BLOCK] close={close_now:.8f} fast={fast_now:.8f} "
-            f"mid={mid_now:.8f} arena={arena_now:.8f}"
-        )
-        return ""
-
-    # DISTANCE FILTER — 0.010 → 0.005 강화
-    distance_from_arena = (arena_now - close_now) / arena_now
-    if distance_from_arena > 0.005:
-        log.debug(f"[DIST_BLOCK] distance={distance_from_arena:.4f}")
-        return ""
-
-    arena_prev = arena.get_prev()
-    if arena_prev is None:
-        return ""
-    if arena_now > arena_prev:   # 상승 시만 차단, 평탄 허용
-        log.debug(f"[TREND_BLOCK] arena not falling")
-        return ""
-
-    swing_lookback  = int(CFG["15_SWING_LOOKBACK"])
-    slope_threshold = float(CFG["14_SLOPE_THRESHOLD"])
-    ref = fast.get_lookback(swing_lookback)
-    if ref is None or ref == 0:
-        return ""
-    slope_val = (fast_now - ref) / ref
-    slope_ok  = slope_val <= -slope_threshold
-    if not slope_ok:
-        return ""
-
-    e1_signal = (fast_prev >= mid_prev) and (fast_now < mid_now)
-
-    tolerance = float(CFG["13_TOUCH_TOLERANCE"])
-    if len(st.high_history) < 2 or len(st.close_history) < 1:
-        return ""
-    pullback  = (
-        (st.high_history[-2] >= mid_prev) and
-        (fast_now < mid_now) and
-        (mid_now  < arena_now)
-    )
-    reentry   = st.close_history[-1] < fast_now
-    e2_signal = pullback and reentry
-
-    if e1_signal:
-        return "E1"
-    if CFG["23_ENTRY2_ENABLE"] and e2_signal:
-        return "E2"
-    return ""
-
-# ============================================================
-# EXIT
-# ============================================================
-
-def exit_signal(st: EngineState, lot: Dict[str, Decimal]):
-    pos = st.position
-    if pos is None:
-        return ("NONE", None)
-
-    close = st.close_history[-1]
-    low   = st.low_history[-1]
-
-    # [1] SL
-    if CFG["40_SL_ENABLE"]:
-        sl = float(CFG["41_SL_PCT"]) / 100.0
-        if pos.be_activated:
-            sl_price = pos.entry_price
-        else:
-            sl_price = pos.entry_price * (1.0 + sl)
-        if close >= sl_price:
-            log.info(f"[EXIT_SL] close={close:.8f} >= SL={sl_price:.8f} be={pos.be_activated}")
-            return ("FULL", "SL")
-
-    # [2] TIMEOUT
-    if CFG["50_TIMEOUT_EXIT_ENABLE"]:
-        if (st.bar - pos.entry_bar) >= int(CFG["51_TIMEOUT_BARS"]):
-            log.info(f"[EXIT_TIMEOUT] bars={st.bar - pos.entry_bar} entry_type={pos.entry_type}")
-            return ("FULL", "TIMEOUT")
-
-    # [3] EMA CROSS
-    ef = st.ema_exit_fast.get()
-    em = st.ema_exit_mid.get()
-    if ef is not None and em is not None:
-        prev_fast = st.ema_exit_fast.get_prev()
-        prev_mid  = st.ema_exit_mid.get_prev()
-        if prev_fast is not None and prev_mid is not None:
-            cross_up = (prev_fast <= prev_mid) and (ef > em)
-            if cross_up:
-                log.info(f"[EXIT_EMA_CROSS] ef={ef:.8f} em={em:.8f} close={close:.8f}")
-                return ("FULL", "EMA_CROSS")
-
-    # [4] TP1
-    if CFG["60_TP1_ENABLE"] and not pos.tp1_done and pos.entry_type != "SYNC":
-        tp1_pct    = float(CFG["61_TP1_PCT"])
-        tp1_target = pos.entry_price * (1.0 - tp1_pct)
-        if close <= tp1_target:
-            partial_ratio = float(CFG["62_TP1_PARTIAL_PCT"])
-            qty_full      = Decimal(pos.qty)
-            qty_partial   = qty_full * Decimal(str(partial_ratio))
-
-            partial_str = calculate_quantity(qty_partial, lot)
-            if partial_str is None:
-                log.warning(f"[TP1_DUST_PREVENT] partial qty < minQty → FULL EXIT upgrade")
-                return ("FULL", "TP1_DUST_TO_FULL")
-
-            remaining     = qty_full - Decimal(partial_str)
-            remaining_str = calculate_quantity(remaining, lot)
-            if remaining_str is None:
-                log.warning(f"[TP1_DUST_PREVENT] remaining < minQty → FULL EXIT upgrade")
-                return ("FULL", "TP1_DUST_TO_FULL")
-
-            log.info(
-                f"[EXIT_TP1] close={close:.8f} <= target={tp1_target:.8f} "
-                f"partial={partial_str} remaining={remaining_str} full={pos.qty}"
-            )
-            return ("PARTIAL", partial_str)
-
-    # BE ACTIVATE
-    if pos.entry_type != "SYNC" and not pos.be_activated:
-        be_trigger = pos.entry_price * (1.0 - 0.006)
-        if close <= be_trigger:
-            return ("BE_ACTIVATE", None)
-
-    # [5] TRAILING
-    if CFG["70_TRAIL_ENABLE"] and pos.tp1_done and pos.entry_type != "SYNC":
-        if low < pos.trail_low:
-            pos.trail_low = low
-            log.debug(f"[TRAIL_LOW_UPDATE] trail_low={pos.trail_low:.8f}")
-
-        trail_pct  = float(CFG["71_TRAIL_CALLBACK_PCT"])
-        trail_stop = pos.trail_low * (1.0 + trail_pct)
-        if close >= trail_stop:
-            log.info(
-                f"[EXIT_TRAIL] close={close:.8f} >= trail_stop={trail_stop:.8f} "
-                f"(trail_low={pos.trail_low:.8f})"
-            )
-            return ("FULL", "TRAIL")
-
-    return ("NONE", None)
-
-# ============================================================
-# EXECUTION
-# ============================================================
-
-def _sync_with_retry(
-    client: "Client",
-    symbol: str,
-    lot: Dict[str, Decimal],
-    st: EngineState,
-    retries: int = 3,
-    delay: float = 0.5,
-) -> None:
-    for attempt in range(1, retries + 1):
-        time.sleep(delay)
-        sync_short_position_state(client, symbol, lot, st)
-        log.debug(
-            f"[SYNC_RETRY] attempt={attempt}/{retries} "
-            f"position={'exists qty=' + st.position.qty if st.position else 'None'}"
-        )
-
-def place_short_entry(client: "Client", symbol: str, capital_usdt: float, lot: Dict[str, Decimal]) -> Optional[str]:
-    try:
-        ticker   = client.futures_symbol_ticker(symbol=symbol)
-        price    = float(ticker["price"])
-        leverage = int(CFG["04_LEVERAGE"])
-        notional = float(capital_usdt) * float(leverage)
-        qty_raw  = notional / price
-        qty_str  = calculate_quantity(qty_raw, lot)
-        if qty_str is None:
-            log.error("entry: qty calculation failed")
-            return None
-        client.futures_create_order(
+    def klines(self, symbol: str, interval: str, limit: int = 500):
+        return self._client.futures_klines(
             symbol=symbol,
-            side=SIDE_SELL,
-            type=ORDER_TYPE_MARKET,
-            quantity=qty_str,
+            interval=interval,
+            limit=limit,
         )
-        return qty_str
-    except Exception as e:
-        log.error(f"place_short_entry: {e}")
-        return None
 
-def place_short_exit(client: "Client", symbol: str, qty: str, lot: Dict[str, Decimal]) -> bool:
-    try:
-        qty2 = normalize_qty_str(qty, lot)
-        if qty2 is None:
-            log.error("exit: qty too small")
-            return False
-        client.futures_create_order(
-            symbol=symbol,
-            side=SIDE_BUY,
-            type=ORDER_TYPE_MARKET,
-            quantity=qty2,
-            reduceOnly=True
-        )
-        return True
-    except Exception as e:
-        log.error(f"place_short_exit: {e}")
-        return False
+    def get_position_risk(self, symbol: str):
+        return self._client.futures_position_information(symbol=symbol)
+
+    def get_orders(self, symbol: str):
+        return self._client.futures_get_open_orders(symbol=symbol)
+
+    def cancel_order(self, symbol: str, orderId: int):
+        return self._client.futures_cancel_order(symbol=symbol, orderId=orderId)
+
+    def cancel_open_orders(self, symbol: str):
+        return self._client.futures_cancel_all_open_orders(symbol=symbol)
+
+    def query_order(self, symbol: str, orderId: int):
+        return self._client.futures_get_order(symbol=symbol, orderId=orderId)
+
+    def new_order(self, **kwargs):
+        if "reduceOnly" in kwargs and isinstance(kwargs["reduceOnly"], str):
+            kwargs["reduceOnly"] = kwargs["reduceOnly"].lower() == "true"
+        return self._client.futures_create_order(**kwargs)
+
+    def change_leverage(self, symbol: str, leverage: int):
+        return self._client.futures_change_leverage(symbol=symbol, leverage=leverage)
+
+    def ticker_price(self, symbol: str):
+        return self._client.futures_symbol_ticker(symbol=symbol)
+
+
+client = BinanceFuturesCompat(API_KEY, API_SECRET)
 
 # ============================================================
-# ENGINE LOOP
+# 심볼 필터 캐시
 # ============================================================
+_SYM_FILTERS: dict = {}
 
-STOP = False
-def _sig_handler(_sig, _frame):
-    global STOP
-    STOP = True
-signal.signal(signal.SIGINT, _sig_handler)
-signal.signal(signal.SIGTERM, _sig_handler)
-
-def _apply_bar(st: EngineState, close: float, high: float, low: float) -> None:
-    st.close_history.append(close)
-    st.high_history.append(high)
-    st.low_history.append(low)
-
-    st.ema_fast.update(close)
-    st.ema_mid.update(close)
-    st.ema_arena.update(close)
-    st.ema_exit_fast.update(close)
-    st.ema_exit_mid.update(close)
-
-    st.ema_fast.trim_history()
-    st.ema_mid.trim_history()
-    st.ema_arena.trim_history()
-    st.ema_exit_fast.trim_history()
-    st.ema_exit_mid.trim_history()
-
-    if len(st.close_history) >= 2:
-        prev_close = st.close_history[-2]
-        tr = max(
-            high - low,
-            abs(high - prev_close),
-            abs(low - prev_close),
-        )
-        st.atr_history.append(tr)
-
-def engine():
-    client   = init_client()
-    symbol   = CFG["01_TRADE_SYMBOL"]
-    interval = CFG["02_INTERVAL"]
-    capital  = float(CFG["03_CAPITAL_BASE_USDT"])
-
-    set_leverage(client, symbol, int(CFG["04_LEVERAGE"]))
-
-    lot = get_futures_lot_size(client, symbol)
-    if lot is None:
-        raise RuntimeError("lot_size retrieval failed")
-
-    st = EngineState()
-
-    sync_short_position_state(client, symbol, lot, st)
-    if st.position is not None:
+def load_symbol_filters(symbol: str) -> dict:
+    global _SYM_FILTERS
+    if symbol in _SYM_FILTERS:
+        return _SYM_FILTERS[symbol]
+    info = client.exchange_info()
+    for s in info["symbols"]:
+        if s["symbol"] != symbol:
+            continue
+        result = {
+            "price_prec":   s["pricePrecision"],
+            "qty_prec":     s["quantityPrecision"],
+            "tick_size":    None,
+            "step_size":    None,
+            "min_qty":      None,
+            "min_notional": None,
+        }
+        for f in s["filters"]:
+            ft = f["filterType"]
+            if ft == "PRICE_FILTER":
+                result["tick_size"] = f["tickSize"]
+            elif ft == "LOT_SIZE":
+                result["step_size"] = f["stepSize"]
+                result["min_qty"]   = float(f["minQty"])
+            elif ft in ("MIN_NOTIONAL", "NOTIONAL"):
+                result["min_notional"] = float(f.get("notional", f.get("minNotional", 5.0)))
+        _SYM_FILTERS[symbol] = result
         log.info(
-            f"[BOOT_SYNC] SHORT position restored: qty={st.position.qty} "
-            f"entry={st.position.entry_price:.8f} entry_type={st.position.entry_type}"
+            f"필터 로드: tick={result['tick_size']} step={result['step_size']} "
+            f"minQty={result['min_qty']} minNotional={result['min_notional']}"
+        )
+        return result
+    raise RuntimeError(f"심볼 {symbol} 필터 없음")
+
+# ============================================================
+# 수치 유틸
+# ============================================================
+
+def _quantize(value: float, unit_str: str, prec: int) -> str:
+    d_val   = Decimal(str(value))
+    d_unit  = Decimal(unit_str)
+    floored = (d_val / d_unit).to_integral_value(rounding=ROUND_DOWN) * d_unit
+    quant   = Decimal("0." + "0" * prec) if prec > 0 else Decimal("1")
+    return str(floored.quantize(quant))
+
+def fmt_price(price: float, sym: str) -> str:
+    f = _SYM_FILTERS[sym]
+    if f["tick_size"]:
+        return _quantize(price, f["tick_size"], f["price_prec"])
+    return f"{round(price, f['price_prec']):.{f['price_prec']}f}"
+
+def fmt_qty(qty: float, sym: str) -> str:
+    f = _SYM_FILTERS[sym]
+    if f["step_size"]:
+        return _quantize(qty, f["step_size"], f["qty_prec"])
+    return f"{round(qty, f['qty_prec']):.{f['qty_prec']}f}"
+
+def is_order_valid(price: float, qty: float, sym: str) -> bool:
+    f = _SYM_FILTERS[sym]
+    if f["min_qty"] and qty < f["min_qty"]:
+        log.warning(f"주문 스킵: qty {qty} < minQty {f['min_qty']}")
+        return False
+    if f["min_notional"] and price * qty < f["min_notional"]:
+        log.warning(f"주문 스킵: notional {price*qty:.2f} < minNotional {f['min_notional']}")
+        return False
+    return True
+
+# ============================================================
+# EMA
+# ============================================================
+
+def calc_ema(values: list, period: int) -> list:
+    if len(values) < period:
+        return []
+    k = 2 / (period + 1)
+    e = sum(values[:period]) / period
+    series = [e]
+    for v in values[period:]:
+        e = float(v) * k + e * (1 - k)
+        series.append(e)
+    return series
+
+# ============================================================
+# 캔들 조회
+# ============================================================
+
+def get_closed_bar_ts_with_closes(symbol: str, interval: str, limit: int = 60):
+    raw    = client.klines(symbol, interval, limit=limit + 1)
+    closed = raw[:-1]
+    closes = [float(k[4]) for k in closed]
+    ts     = int(closed[-1][0]) if closed else 0
+    return closes, ts
+
+def get_closed_bar_open_ts(symbol: str, interval: str) -> int:
+    raw = client.klines(symbol, interval, limit=2)
+    return int(raw[-2][0])
+
+# ============================================================
+# BarCache
+# ============================================================
+
+class BarCache:
+    def __init__(self, min_interval_sec: float = 0):
+        self._last_ts: int         = 0
+        self._cached_result        = None
+        self._last_api_time: float = 0.0
+        self._min_interval         = min_interval_sec
+
+    def query(self, fetch_fn, compute_fn):
+        now = time.time()
+        if self._cached_result is not None and \
+                (now - self._last_api_time) < self._min_interval:
+            return self._cached_result, self._last_ts
+        closes, ts          = fetch_fn()
+        self._last_api_time = now
+        if ts != self._last_ts or self._cached_result is None:
+            self._cached_result = compute_fn(closes)
+            self._last_ts       = ts
+        return self._cached_result, ts
+
+# ============================================================
+# 4시간 필터
+# ============================================================
+
+def _compute_4h_filter(closes: list) -> bool:
+    period = CFG["HTF_FILTER_EMA_LEN"]
+    if len(closes) < period + 1:
+        log.warning("HTF 데이터 부족 → 필터 차단")
+        return False
+    ema_s = calc_ema(closes, period)
+    ok    = closes[-1] < ema_s[-1]
+    label = "PASS" if ok else "BLOCK"
+    log.info(f"[HTF FILTER {label}] 4H close {closes[-1]:.4f} {'<' if ok else '>='} EMA{period} {ema_s[-1]:.4f}")
+    return ok
+
+def check_4h_short_filter(symbol: str, cache: BarCache) -> bool:
+    if not CFG["HTF_FILTER_ENABLE"]:
+        return True
+    period = CFG["HTF_FILTER_EMA_LEN"]
+    result, _ = cache.query(
+        fetch_fn=lambda: get_closed_bar_ts_with_closes(
+            symbol, CFG["INTERVAL_FILTER_HTF"], limit=period + 10
+        ),
+        compute_fn=_compute_4h_filter,
+    )
+    return result
+
+# ============================================================
+# 5M EMA15 역전 트리거 + 1봉 확정 필터
+# 조건:
+#   1) close[-1] < ema15[-1]   — EMA15 하향 돌파
+#   2) high[-2]  > ema15[-2]   — 직전봉 고가가 EMA15 위 (꺾이는 순간)
+#   3) close[-1] < close[-2]   — 하락 확정 1봉
+# ============================================================
+
+def _compute_5m_trigger(closes: list, highs: list) -> bool:
+    period = CFG["EMA_TRIGGER_LEN"]
+    if len(closes) < period + 2 or len(highs) < period + 2:
+        return False
+    ema_s = calc_ema(closes, period)
+    cond1 = closes[-1] < ema_s[-1]
+    cond2 = highs[-2]  > ema_s[-2]
+    cond3 = closes[-1] < closes[-2]
+    triggered = cond1 and cond2 and cond3
+    if triggered:
+        log.info(
+            f"[5M TRIGGER] EMA15 역전 확정: "
+            f"close={closes[-1]:.4f}<ema={ema_s[-1]:.4f} | "
+            f"high[-2]={highs[-2]:.4f}>ema[-2]={ema_s[-2]:.4f} | "
+            f"close[-1]={closes[-1]:.4f}<close[-2]={closes[-2]:.4f}"
+        )
+    return triggered
+
+
+def calc_ema15_trigger(symbol: str, cache: BarCache) -> tuple[bool, int]:
+    period = CFG["EMA_TRIGGER_LEN"]
+    limit  = period + 10
+    raw    = client.klines(symbol, CFG["INTERVAL_TRIGGER"], limit=limit + 1)
+    closed = raw[:-1]
+    closes = [float(k[4]) for k in closed]
+    highs  = [float(k[2]) for k in closed]
+    ts     = int(closed[-1][0]) if closed else 0
+    result = _compute_5m_trigger(closes, highs)
+    return result, ts
+
+# ============================================================
+# 포지션
+# ============================================================
+
+def get_position(symbol: str) -> dict:
+    for p in client.get_position_risk(symbol=symbol):
+        if p["symbol"] == symbol:
+            return {"amt": float(p["positionAmt"]), "avg_price": float(p["entryPrice"])}
+    return {"amt": 0.0, "avg_price": 0.0}
+
+def has_short_position(pos: dict) -> bool:
+    return pos["amt"] < -0.0001
+
+# ============================================================
+# 주문 유틸 (모듈 레벨)
+# ============================================================
+
+def get_open_orders(symbol: str) -> list:
+    try:
+        return client.get_orders(symbol=symbol)
+    except ClientError as e:
+        log.error(f"주문 조회 실패: {e}")
+        return []
+
+def cancel_order(symbol: str, order_id: int) -> bool:
+    try:
+        client.cancel_order(symbol=symbol, orderId=order_id)
+        log.info(f"주문 취소: {order_id}")
+        return True
+    except ClientError as e:
+        log.warning(f"주문 취소 실패 ({order_id}): {e}")
+        return False
+
+def cancel_all_orders(symbol: str):
+    try:
+        client.cancel_open_orders(symbol=symbol)
+        log.info("미체결 전체 취소")
+    except ClientError as e:
+        log.warning(f"전체 취소 실패: {e}")
+
+def query_order_status(symbol: str, order_id: int) -> str:
+    try:
+        return client.query_order(symbol=symbol, orderId=order_id).get("status", "UNKNOWN")
+    except ClientError as e:
+        log.warning(f"query_order 실패 ({order_id}): {e}")
+        return "UNKNOWN"
+
+def place_limit_short(symbol: str, price: float, qty: float) -> dict | None:
+    if not is_order_valid(price, qty, symbol):
+        return None
+    try:
+        order = client.new_order(
+            symbol=symbol, side="SELL", type="LIMIT", timeInForce="GTC",
+            price=fmt_price(price, symbol), quantity=fmt_qty(qty, symbol),
+        )
+        log.info(f"숏 지정가: {fmt_price(price, symbol)} × {fmt_qty(qty, symbol)}")
+        return order
+    except ClientError as e:
+        log.error(f"숏 주문 실패: {e}")
+        return None
+
+def place_market_short(symbol: str, qty: float) -> dict | None:
+    q_str = fmt_qty(abs(qty), symbol)
+    if float(q_str) <= 0:
+        log.warning(f"시장가 숏 스킵: qty={q_str}")
+        return None
+    try:
+        order = client.new_order(
+            symbol=symbol, side="SELL", type="MARKET",
+            quantity=q_str,
+        )
+        log.info(f"시장가 숏 진입: {q_str}")
+        return order
+    except ClientError as e:
+        log.error(f"시장가 숏 실패: {e}")
+        return None
+
+def place_limit_exit(symbol: str, price: float, qty: float) -> dict | None:
+    if not is_order_valid(price, qty, symbol):
+        return None
+    try:
+        order = client.new_order(
+            symbol=symbol, side="BUY", type="LIMIT", timeInForce="GTC",
+            price=fmt_price(price, symbol), quantity=fmt_qty(qty, symbol),
+            reduceOnly="true",
+        )
+        log.info(f"청산 지정가: {fmt_price(price, symbol)} × {fmt_qty(qty, symbol)}")
+        return order
+    except ClientError as e:
+        log.error(f"청산 주문 실패: {e}")
+        return None
+
+def market_close_short(symbol: str, qty: float) -> bool:
+    q_str = fmt_qty(abs(qty), symbol)
+    if float(q_str) <= 0:
+        log.warning(f"시장가 청산 스킵: qty={q_str}")
+        return False
+    try:
+        client.new_order(
+            symbol=symbol, side="BUY", type="MARKET",
+            quantity=q_str, reduceOnly="true",
+        )
+        log.info(f"시장가 청산: {q_str}")
+        return True
+    except ClientError as e:
+        log.error(f"시장가 청산 실패: {e}")
+        return False
+
+def set_leverage(symbol: str, leverage: int):
+    try:
+        client.change_leverage(symbol=symbol, leverage=leverage)
+        log.info(f"레버리지 {leverage}x 설정")
+    except ClientError as e:
+        log.warning(f"레버리지 설정 오류: {e}")
+
+# ============================================================
+# 사이즈 / 가격 계산
+# ============================================================
+
+def normalize_weights(weights: list, count: int) -> list:
+    w = weights[:count]
+    t = sum(w)
+    return [x / t for x in w]
+
+def build_ladder_prices(entry_price: float, count: int, gap_pct: float) -> list:
+    return [entry_price * (1 + gap_pct * i) for i in range(count)]
+
+def calc_ladder_quantities(total_capital: float, leverage: float,
+                           weights: list, entry_price: float) -> list:
+    effective = total_capital * CFG["MAX_CAPITAL_RATIO"] * leverage
+    return [effective * w / entry_price for w in weights]
+
+def get_stage_target_pct(stage: int) -> float:
+    if stage <= 3: return CFG["TARGET_PROFIT_STAGE_1_3"]
+    if stage <= 7: return CFG["TARGET_PROFIT_STAGE_4_7"]
+    return CFG["TARGET_PROFIT_STAGE_8_10"]
+
+def calc_exit_price(avg_price: float, stage: int) -> float:
+    return avg_price * (1 - CFG["FEE_PCT_ONEWAY"] * 2 - get_stage_target_pct(stage))
+
+# ============================================================
+# 5분 완료봉 감지
+# ============================================================
+
+class BarTracker:
+    def __init__(self, symbol: str, interval: str):
+        self.symbol        = symbol
+        self.interval      = interval
+        self.last_ts       = None
+        self._cached_ts    = None
+        self._last_checked = 0.0
+
+    def new_bar_closed(self) -> bool:
+        now = time.time()
+        if now - self._last_checked >= CFG["BAR_CHECK_MIN_INTERVAL_SEC"]:
+            self._cached_ts    = get_closed_bar_open_ts(self.symbol, self.interval)
+            self._last_checked = now
+        ts = self._cached_ts
+        if ts is None:
+            return False
+        if self.last_ts is None:
+            self.last_ts = ts
+            return False
+        if ts > self.last_ts:
+            self.last_ts = ts
+            return True
+        return False
+
+# ============================================================
+# 상태 머신
+# ============================================================
+
+class RangeShortEngine:
+    def __init__(self):
+        self.state  = "WATCHING"
+        self.symbol = CFG["SYMBOL"]
+
+        self.ladder_orders: list[dict] = []
+        self.entry_price_base = None
+
+        self.max_filled_stage = 0
+        self.exit_order_ids: list[int] = []
+        self.last_exit_qty   = 0.0
+        self.last_exit_price = 0.0
+        self.last_stage      = 0
+
+        self.tp1_done:  bool         = False
+        self.trail_low: float | None = None
+
+        self._filled_order_ids:   set[int] = set()
+        self._canceled_order_ids: set[int] = set()
+        self._last_position_amt            = 0.0
+
+        self._closing_in_progress: bool = False
+
+        self.bars_after_deep  = 0
+        self.cooldown_bars    = 0
+        self.no_fill_bars     = 0  # 신규: 미체결 타임아웃 카운터
+
+        self.last_trigger_bar_ts: int = 0
+
+        self.bar_tracker = BarTracker(self.symbol, CFG["INTERVAL_EXEC"])
+
+        min_iv = CFG["BAR_CHECK_MIN_INTERVAL_SEC"]
+        self._htf_cache     = BarCache(min_interval_sec=min_iv)
+        self._trigger_cache = BarCache(min_interval_sec=min_iv)
+
+        load_symbol_filters(self.symbol)
+        set_leverage(self.symbol, CFG["LEVERAGE"])
+
+    # --------------------------------------------------------
+    # 안전 취소 — FILLED / 이미 취소된 주문 재cancel 금지
+    # --------------------------------------------------------
+    def _safe_cancel(self, order_id: int):
+        if order_id in self._filled_order_ids:
+            return
+        if order_id in self._canceled_order_ids:
+            return
+        success = cancel_order(self.symbol, order_id)
+        if success:
+            self._canceled_order_ids.add(order_id)
+
+    def _cancel_ladder_orders(self):
+        for o in self.ladder_orders:
+            self._safe_cancel(o["order_id"])
+
+    def cancel_buy_exit_orders(self, exit_order_ids: list):
+        for oid in exit_order_ids:
+            self._safe_cancel(oid)
+
+    # --------------------------------------------------------
+    # FILLED 캐시 기반 체결 단계 카운트
+    # --------------------------------------------------------
+    def _count_filled_stages(self) -> int:
+        for o in self.ladder_orders:
+            oid = o["order_id"]
+            if oid in self._filled_order_ids:
+                continue
+            if query_order_status(self.symbol, oid) == "FILLED":
+                self._filled_order_ids.add(oid)
+        return sum(1 for o in self.ladder_orders
+                   if o["order_id"] in self._filled_order_ids)
+
+    # --------------------------------------------------------
+    # 재시작 동기화
+    # --------------------------------------------------------
+    def _sync_on_start(self):
+        pos         = get_position(self.symbol)
+        open_orders = get_open_orders(self.symbol)
+        sell_orders = [o for o in open_orders if o["side"] == "SELL" and o["status"] == "NEW"]
+        sell_sorted = sorted(sell_orders, key=lambda x: float(x["price"]))
+
+        if has_short_position(pos):
+            log.info("[SYNC] 포지션 감지 → POSITION_HOLD 복구")
+            self.state = "POSITION_HOLD"
+
+            for i, o in enumerate(sell_sorted):
+                self.ladder_orders.append({
+                    "stage":    i + 1,
+                    "order_id": int(o["orderId"]),
+                    "price":    float(o["price"]),
+                    "qty":      float(o["origQty"]),
+                })
+            self.entry_price_base   = pos["avg_price"]
+            self._last_position_amt = pos["amt"]
+
+            buy_orders = [o for o in open_orders if o["side"] == "BUY" and o["status"] == "NEW"]
+            self.exit_order_ids = [int(o["orderId"]) for o in buy_orders]
+
+            self.max_filled_stage = self._count_filled_stages()
+            self.last_stage       = self.max_filled_stage
+
+            self.tp1_done  = True
+            self.trail_low = None
+            log.info(
+                f"[SYNC] 복구 완료 | avg={pos['avg_price']} | "
+                f"SELL {len(sell_sorted)}개 | BUY exit {len(buy_orders)}개 | "
+                f"max_filled_stage={self.max_filled_stage} | "
+                f"tp1_done=True(보수적) trail_low=None"
+            )
+
+        elif sell_sorted:
+            log.info("[SYNC] 포지션 없음 + SELL 주문 존재 → LADDER_ACTIVE 복구")
+            self.state = "LADDER_ACTIVE"
+            for i, o in enumerate(sell_sorted):
+                self.ladder_orders.append({
+                    "stage":    i + 1,
+                    "order_id": int(o["orderId"]),
+                    "price":    float(o["price"]),
+                    "qty":      float(o["origQty"]),
+                })
+            self.entry_price_base = float(sell_sorted[0]["price"])
+            log.info(f"[SYNC] entry_price_base = {self.entry_price_base:.4f} (min SELL price)")
+
+        else:
+            log.info("[SYNC] 포지션 없음 + 주문 없음 → WATCHING 시작")
+            self.state = "WATCHING"
+
+    # --------------------------------------------------------
+    # 메인 루프
+    # --------------------------------------------------------
+    def run(self):
+        log.info("=" * 60)
+        log.info("VELLA RANGE SHORT LADDER v8 FINAL 시작")
+        log.info(f"심볼: {self.symbol} | 자본: {CFG['TOTAL_CAPITAL_USDT']} USDT | 레버: {CFG['LEVERAGE']}x")
+        log.info("=" * 60)
+        self._sync_on_start()
+        while True:
+            try:
+                self._tick()
+            except Exception as e:
+                log.error(f"루프 오류: {e}", exc_info=True)
+            time.sleep(CFG["POLL_INTERVAL_SEC"])
+
+    # --------------------------------------------------------
+    # 틱
+    # --------------------------------------------------------
+    def _tick(self):
+        symbol = self.symbol
+        ticker = client.ticker_price(symbol=symbol)
+        current_price = float(ticker["price"])
+
+        pos     = get_position(symbol)
+        has_pos = has_short_position(pos)
+        new_bar = self.bar_tracker.new_bar_closed()
+
+        # ── COOLDOWN ──
+        if self.state == "COOLDOWN":
+            if new_bar:
+                self.cooldown_bars -= 1
+                log.info(f"쿨다운: 남은 봉 {self.cooldown_bars}")
+            if self.cooldown_bars <= 0:
+                self.state = "WATCHING"
+                log.info("쿨다운 종료 → WATCHING")
+            return
+
+        # ── WATCHING ──
+        if self.state == "WATCHING":
+            if has_pos:
+                log.warning("외부 포지션 감지 → POSITION_HOLD")
+                self.state = "POSITION_HOLD"
+                return
+
+            if not check_4h_short_filter(symbol, self._htf_cache):
+                return
+
+            triggered, bar_ts = calc_ema15_trigger(symbol, self._trigger_cache)
+
+            if triggered and bar_ts == self.last_trigger_bar_ts:
+                log.debug(f"동일 15M 봉 재트리거 차단: ts={bar_ts}")
+                return
+
+            if triggered:
+                self.last_trigger_bar_ts = bar_ts
+                self._deploy_ladder(current_price)
+            return
+
+        # ── LADDER_ACTIVE ──
+        if self.state == "LADDER_ACTIVE":
+            if has_pos:
+                log.info("포지션 체결 감지 → POSITION_HOLD")
+                self.state              = "POSITION_HOLD"
+                self.bars_after_deep    = 0
+                self.no_fill_bars       = 0
+                self._last_position_amt = pos["amt"]
+                return
+
+            # 신규: 미체결 타임아웃 — 5M 12봉 체결 0개 시 철거→WATCHING
+            if new_bar:
+                self.no_fill_bars += 1
+                log.info(f"거미줄 미체결 대기: {self.no_fill_bars}/{CFG['LADDER_NO_FILL_TIMEOUT_BARS']}봉")
+            if self.no_fill_bars >= CFG["LADDER_NO_FILL_TIMEOUT_BARS"]:
+                log.warning(f"거미줄 미체결 타임아웃 ({self.no_fill_bars}봉) → 철거 후 WATCHING")
+                self._cancel_ladder_orders()
+                self._reset_ladder()
+                self.state = "WATCHING"
+                return
+
+            if self._is_ladder_invalid(current_price):
+                log.warning("거미줄 무효화: 상단 이탈 → SELL 취소 후 WATCHING")
+                self._cancel_ladder_orders()
+                self._reset_ladder()
+                self.state = "WATCHING"
+                return
+
+            log.info(f"거미줄 대기 | 현재가: {current_price:.4f}")
+            return
+
+        # ── POSITION_HOLD ──
+        if self.state == "POSITION_HOLD":
+            if not has_pos:
+                log.info("포지션 청산 감지 → 쿨다운")
+                self.cancel_buy_exit_orders(self.exit_order_ids)
+                self.exit_order_ids = []
+                self._cancel_ladder_orders()
+                self._start_cooldown()
+                return
+
+            avg_price    = pos["avg_price"]
+            position_qty = pos["amt"]
+
+            amt_changed = abs(position_qty - self._last_position_amt) > 0.0001
+            if amt_changed or self.max_filled_stage == 0 or new_bar:
+                filled = self._count_filled_stages()
+                if filled > self.max_filled_stage:
+                    log.info(f"체결 단계 갱신: {self.max_filled_stage} → {filled}")
+                    self.max_filled_stage = filled
+                self._last_position_amt = position_qty
+
+            log.info(
+                f"HOLD | avg={avg_price:.4f} | price={current_price:.4f} | "
+                f"stage={self.max_filled_stage} | qty={position_qty:.4f} | "
+                f"tp1={self.tp1_done} | trail_low={self.trail_low} | "
+                f"closing={self._closing_in_progress}"
+            )
+
+            pnl_pct = (avg_price - current_price) / avg_price
+
+            # 1. HARD SL
+            if pnl_pct < -CFG["HARD_SL_PCT"]:
+                log.warning(f"HARD SL 발동 | 손실 {pnl_pct*100:.2f}%")
+                self._final_close(symbol, position_qty, "HARD_SL")
+                return
+
+            # 2. TIMEOUT
+            if self.max_filled_stage >= CFG["DEEP_FILL_STAGE"]:
+                if new_bar:
+                    self.bars_after_deep += 1
+                if self.bars_after_deep >= CFG["TIMEOUT_BARS_AFTER_DEEP"]:
+                    log.warning(f"TIMEOUT 발동 | {self.bars_after_deep}봉")
+                    self._final_close(symbol, position_qty, "TIMEOUT")
+                    return
+
+            # 3. TP1
+            if not self.tp1_done and pnl_pct >= CFG["TP1_PROFIT_PCT"]:
+                self._handle_tp1(symbol, position_qty, current_price)
+                return
+
+            # 4. 트레일링
+            if self.tp1_done:
+                if self.trail_low is None:
+                    self.trail_low = current_price
+                    log.info(f"trail_low 초기화: {self.trail_low:.4f}")
+
+                self.trail_low = min(self.trail_low, current_price)
+
+                if current_price >= self.trail_low * (1 + CFG["TRAILING_REBOUND_PCT"]):
+                    log.info(
+                        f"[TRAIL EXIT] 저점={self.trail_low:.4f} 대비 +1% 반등 "
+                        f"(current={current_price:.4f})"
+                    )
+                    self._final_close(symbol, position_qty, "TRAIL")
+                return
+
+            # 5. 지정가 EXIT 동기화 (closing 중에는 생략)
+            if not self._closing_in_progress:
+                self._sync_exit_order(symbol, avg_price, position_qty)
+
+    # --------------------------------------------------------
+    # TP1 처리
+    # --------------------------------------------------------
+    def _handle_tp1(self, symbol: str, position_qty: float, current_price: float):
+        partial_qty = abs(position_qty) * CFG["TP1_PARTIAL_RATIO"]
+        log.info(f"[TP1] 수익 도달 → 50% 부분청산 시도 qty={partial_qty:.4f}")
+
+        success = market_close_short(symbol, partial_qty)
+
+        if success:
+            time.sleep(0.2)
+            pos = get_position(symbol)
+
+            self.cancel_buy_exit_orders(self.exit_order_ids)
+            self.exit_order_ids = []
+
+            self._cancel_ladder_orders()
+            self.ladder_orders     = []
+            self._filled_order_ids = set()
+            self.max_filled_stage  = 0
+
+            self._last_position_amt = pos["amt"]
+            self.tp1_done  = True
+            self.trail_low = None
+            log.info(
+                f"[TP1] 부분청산 성공 → tp1_done=True | "
+                f"잔량={pos['amt']:.4f} | trail_low=None(다음 tick 세팅)"
+            )
+        else:
+            log.error("[TP1] 부분청산 실패 → 기존 주문 유지, 다음 tick 재시도")
+
+    # --------------------------------------------------------
+    # 공용 종료 헬퍼
+    # --------------------------------------------------------
+    def _final_close(self, symbol: str, position_qty: float, reason: str):
+        log.info(f"[FINAL CLOSE] 사유={reason} | qty={position_qty:.4f}")
+        self._closing_in_progress = True
+
+        self.cancel_buy_exit_orders(self.exit_order_ids)
+        self.exit_order_ids = []
+
+        self._cancel_ladder_orders()
+
+        success = market_close_short(symbol, abs(position_qty))
+
+        if success:
+            self._closing_in_progress = False
+            self._start_cooldown()
+        else:
+            log.error(
+                f"[FINAL CLOSE] 청산 실패 → POSITION_HOLD 유지, 다음 tick 재시도 "
+                f"(사유={reason})"
+            )
+
+    # --------------------------------------------------------
+    # 거미줄 배치 — 1차 시장가, 2~10차 지정가
+    # --------------------------------------------------------
+    def _deploy_ladder(self, current_price: float):
+        symbol  = self.symbol
+        count   = CFG["LADDER_COUNT"]
+        gap     = CFG["LADDER_GAP_PCT"]
+        weights = normalize_weights(CFG["SIZE_WEIGHTS"], count)
+        prices  = build_ladder_prices(current_price, count, gap)
+        qtys    = calc_ladder_quantities(
+            CFG["TOTAL_CAPITAL_USDT"], CFG["LEVERAGE"], weights, current_price
         )
 
-    log.info(
-        f"START BR8 SHORT | symbol={symbol} interval={interval} capital={capital} "
-        f"lev={CFG['04_LEVERAGE']} "
-        f"| ENTRY_EMA=({CFG['10_EMA_FAST']},{CFG['11_EMA_MID']},{CFG['12_EMA_ARENA']}) "
-        f"| EXIT_EMA=({CFG['30_EXIT_FAST_EMA']},{CFG['31_EXIT_MID_EMA']}) "
-        f"| HTF=4H_BEAR+EMA20 "
-        f"| SLOPE={CFG['14_SLOPE_THRESHOLD']} ATR={CFG['18_ATR_THRESHOLD_PCT']} "
-        f"| TP1={CFG['61_TP1_PCT']*100:.2f}%x{CFG['62_TP1_PARTIAL_PCT']*100:.0f}% "
-        f"| TRAIL={CFG['71_TRAIL_CALLBACK_PCT']*100:.2f}%"
-    )
+        cancel_all_orders(symbol)
+        self._reset_ladder()
+        self.entry_price_base = current_price
 
-    while not STOP:
-        try:
-            kl = fetch_klines_futures(symbol, interval, int(CFG["90_KLINE_LIMIT"]))
-            if not kl:
-                time.sleep(CFG["91_POLL_SEC"])
-                continue
+        log.info(f"거미줄 배치 | 기준가: {current_price:.4f} | {count}단계")
+        success = 0
 
-            completed = kl[-2]
-            open_time = int(completed[0])
+        # 1차: 시장가 즉시 진입
+        order_1st = place_market_short(symbol, qtys[0])
+        if order_1st:
+            self.ladder_orders.append({
+                "stage":    1,
+                "order_id": int(order_1st["orderId"]),
+                "price":    current_price,
+                "qty":      qtys[0],
+            })
+            self._filled_order_ids.add(int(order_1st["orderId"]))
+            self.max_filled_stage = 1
+            success += 1
+            log.info(f"1차 시장가 진입 완료: qty={fmt_qty(qtys[0], symbol)}")
+        else:
+            log.error("1차 시장가 진입 실패")
 
-            if st.last_open_time == open_time:
-                time.sleep(CFG["91_POLL_SEC"])
-                continue
+        # 2~10차: 지정가 거미줄
+        for i in range(1, count):
+            order = place_limit_short(symbol, prices[i], qtys[i])
+            if order:
+                self.ladder_orders.append({
+                    "stage":    i + 1,
+                    "order_id": int(order["orderId"]),
+                    "price":    prices[i],
+                    "qty":      qtys[i],
+                })
+                success += 1
+            time.sleep(0.15)
 
-            if not st.close_history:
-                for k in kl[:-1]:
-                    _apply_bar(st, float(k[4]), float(k[2]), float(k[3]))
-                st.bar = len(st.close_history)
-                st.last_open_time = int(kl[-2][0])
-                log.info(f"[BOOT] {st.bar} bars loaded, EMA warm-up complete={_warmup_done(st)}")
-                continue
+        if success == 0:
+            log.error("거미줄 주문 0개 성공 → WATCHING 복귀")
+            self.state = "WATCHING"
+        else:
+            log.info(f"거미줄 배치 완료: {success}/{count}개 → LADDER_ACTIVE")
+            self.no_fill_bars = 0
+            self.state = "POSITION_HOLD" if order_1st else "LADDER_ACTIVE"
 
-            st.last_open_time = open_time
-            st.bar += 1
+    # --------------------------------------------------------
+    # 거미줄 무효화
+    # --------------------------------------------------------
+    def _is_ladder_invalid(self, current_price: float) -> bool:
+        if not self.entry_price_base or not self.ladder_orders:
+            return False
+        top_price  = self.ladder_orders[-1]["price"]
+        buffer_pct = CFG["LADDER_GAP_PCT"] * CFG["LADDER_INVALIDATION_MULT"]
+        return current_price > top_price * (1 + buffer_pct)
 
-            _apply_bar(st, float(completed[4]), float(completed[2]), float(completed[3]))
+    # --------------------------------------------------------
+    # 지정가 EXIT 동기화
+    # --------------------------------------------------------
+    def _sync_exit_order(self, symbol: str, avg_price: float, position_qty: float):
+        stage      = max(self.max_filled_stage, 1)
+        exit_price = calc_exit_price(avg_price, stage)
+        exit_qty   = abs(position_qty)
+        threshold  = CFG["EXIT_REPRICE_THRESHOLD_PCT"]
 
-            if st.ema_fast.ready and st.ema_mid.ready and st.ema_arena.ready and st.close_history:
-                close_now   = st.close_history[-1]
-                arena_now   = st.ema_arena.get()
-                short_arena_now = (
-                    (close_now         < arena_now) and
-                    (st.ema_fast.get() < arena_now) and
-                    (st.ema_mid.get()  < arena_now)
-                )
-                if short_arena_now != st.prev_arena_state:
-                    if short_arena_now:
-                        log.info(f"[ARENA] 통과 close={close_now:.8f} < arena={arena_now:.8f}")
-                    else:
-                        log.info(f"[ARENA] 차단 close={close_now:.8f} arena={arena_now:.8f}")
-                    st.prev_arena_state = short_arena_now
+        need_replace = (
+            not self.exit_order_ids
+            or stage != self.last_stage
+            or abs(exit_price - self.last_exit_price) > exit_price * threshold
+            or abs(exit_qty   - self.last_exit_qty)   > exit_qty   * 0.05
+        )
 
-            # ============================================================
-            # ENTRY
-            # ============================================================
-            if st.position is None:
-                if not is_4h_bear_and_below_ema20(symbol):
-                    log.debug("[HTF_BLOCK] 4H not bear_or_not_below_ema20")
-                    entry_type = ""
-                else:
-                    entry_type = short_entry_signals(st)
+        if not need_replace:
+            return
 
-                if entry_type:
-                    qty_str = place_short_entry(client, symbol, capital, lot)
-                    if qty_str:
-                        _sync_with_retry(client, symbol, lot, st, retries=3, delay=0.5)
-                        if st.position is not None:
-                            st.position.entry_type = entry_type
-                            st.position.entry_bar  = st.bar
-                            st.position.tp1_done   = False
-                            log.info(
-                                f"[ENTRY] SHORT type={entry_type} qty={st.position.qty} "
-                                f"entry={st.position.entry_price:.8f} bar={st.bar}"
-                            )
-                        else:
-                            log.error(
-                                f"[ENTRY_SYNC_FAIL] position not found after 3 retries "
-                                f"qty={qty_str} bar={st.bar} → immediate re-sync"
-                            )
-                            sync_short_position_state(client, symbol, lot, st)
-                            if st.position is not None:
-                                st.position.entry_type = entry_type
-                                st.position.entry_bar  = st.bar
-                                st.position.tp1_done   = False
-                                log.info(
-                                    f"[ENTRY_SYNC_RECOVERED] SHORT type={entry_type} "
-                                    f"qty={st.position.qty} entry={st.position.entry_price:.8f} bar={st.bar}"
-                                )
-                            else:
-                                log.error(
-                                    f"[ENTRY_SYNC_FAIL_FINAL] position still not found. "
-                                    f"Will re-check next bar. qty={qty_str} bar={st.bar}"
-                                )
-                    else:
-                        log.error("[ENTRY_FAIL] order failed")
+        self.cancel_buy_exit_orders(self.exit_order_ids)
+        self.exit_order_ids = []
+        self.last_stage     = -1
 
-            # ============================================================
-            # EXIT
-            # ============================================================
-            else:
-                if st.position.entry_bar == st.bar:
-                    continue
+        order = place_limit_exit(symbol, exit_price, exit_qty)
+        if order:
+            self.exit_order_ids  = [int(order["orderId"])]
+            self.last_exit_price = exit_price
+            self.last_exit_qty   = exit_qty
+            self.last_stage      = stage
+            log.info(
+                f"청산 주문 동기화 | stage={stage} | "
+                f"청산가={exit_price:.4f} | qty={exit_qty:.4f}"
+            )
 
-                exit_type, exit_data = exit_signal(st, lot)
+    # --------------------------------------------------------
+    # 내부 리셋
+    # --------------------------------------------------------
+    def _reset_ladder(self):
+        self.ladder_orders          = []
+        self.entry_price_base       = None
+        self.max_filled_stage       = 0
+        self.exit_order_ids         = []
+        self.last_exit_qty          = 0.0
+        self.last_exit_price        = 0.0
+        self.bars_after_deep        = 0
+        self.no_fill_bars           = 0
+        self.last_stage             = 0
+        self._filled_order_ids      = set()
+        self._canceled_order_ids    = set()
+        self._last_position_amt     = 0.0
+        self._closing_in_progress   = False
+        self.tp1_done               = False
+        self.trail_low              = None
 
-                if exit_type == "BE_ACTIVATE":
-                    if st.position is not None and not st.position.be_activated:
-                        st.position.be_activated = True
-                        log.info(
-                            f"[BE_ACTIVATED] close={st.close_history[-1]:.8f} "
-                            f"entry={st.position.entry_price:.8f} bar={st.bar}"
-                        )
+    def _start_cooldown(self):
+        self._reset_ladder()
+        self.state         = "COOLDOWN"
+        self.cooldown_bars = CFG["REENTRY_COOLDOWN_BARS"]
+        log.info(f"쿨다운 시작: {self.cooldown_bars}봉 (5m 기준)")
 
-                elif exit_type == "FULL":
-                    ok = place_short_exit(client, symbol, st.position.qty, lot)
-                    if ok:
-                        log.info(
-                            f"[EXIT_FULL] reason={exit_data} type={st.position.entry_type} "
-                            f"close={st.close_history[-1]:.8f} entry={st.position.entry_price:.8f} bar={st.bar}"
-                        )
-                        _sync_with_retry(client, symbol, lot, st, retries=3, delay=0.5)
-                    else:
-                        log.error(f"[EXIT_FULL_FAIL] reason={exit_data} order failed → resync")
-                        sync_short_position_state(client, symbol, lot, st)
 
-                elif exit_type == "PARTIAL":
-                    partial_qty = exit_data
-                    ok = place_short_exit(client, symbol, partial_qty, lot)
-                    if ok:
-                        log.info(f"[EXIT_TP1_ORDER_OK] partial={partial_qty} bar={st.bar} → resync")
-                        _sync_with_retry(client, symbol, lot, st, retries=3, delay=0.5)
-                        if st.position is not None:
-                            st.position.tp1_done  = True
-                            st.position.trail_low = st.low_history[-1]
-                            log.info(
-                                f"[EXIT_TP1] remaining={st.position.qty} "
-                                f"trail_low_init={st.position.trail_low:.8f} bar={st.bar}"
-                            )
-                        else:
-                            log.info(f"[EXIT_TP1] position fully closed after resync bar={st.bar}")
-                    else:
-                        log.error(f"[EXIT_TP1_FAIL] partial order failed partial={partial_qty} → resync + force FULL")
-                        sync_short_position_state(client, symbol, lot, st)
-                        if st.position is not None:
-                            log.error(f"[EXIT_TP1_FAIL] position still alive → force FULL exit qty={st.position.qty}")
-                            ok2 = place_short_exit(client, symbol, st.position.qty, lot)
-                            if ok2:
-                                log.info(f"[EXIT_TP1_FORCE_FULL] qty={st.position.qty} close={st.close_history[-1]:.8f} bar={st.bar}")
-                                _sync_with_retry(client, symbol, lot, st, retries=3, delay=0.5)
-                            else:
-                                log.error("[EXIT_TP1_FORCE_FULL_FAIL] force full also failed → resync, will retry next bar")
-                                sync_short_position_state(client, symbol, lot, st)
-                        else:
-                            log.info(f"[EXIT_TP1_FAIL_BUT_CLOSED] position already closed after resync bar={st.bar}")
-
-        except Exception as e:
-            log.error(f"engine loop error: {e}")
-            time.sleep(CFG["91_POLL_SEC"])
-
-    log.info("STOP BR8 SHORT")
-
+# ============================================================
+# 엔트리포인트
+# ============================================================
 if __name__ == "__main__":
-    engine()
+    engine = RangeShortEngine()
+    engine.run()
