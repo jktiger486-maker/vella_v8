@@ -56,7 +56,7 @@ ClientError = (BinanceAPIException, BinanceOrderException)
 # CFG
 # ============================================================
 CFG = {
-    "SYMBOL":              "CHRUSDT",
+    "SYMBOL":              "AIOTUSDT",
     "INTERVAL_TRIGGER":    "5m",        # 1h → 15m → 5m 변경
     "INTERVAL_EXEC":       "5m",
     "INTERVAL_FILTER_HTF": "4h",
@@ -70,7 +70,7 @@ CFG = {
     "MAX_CAPITAL_RATIO":  0.95,
 
     "LADDER_COUNT":   10,
-    "LADDER_GAP_PCT": 0.011,
+    "LADDER_GAP_PCT": 0.013,
     "SIZE_WEIGHTS": [
         1.5, 1.4, 1.3, 1.2, 1.1,
         1.0, 0.9, 0.8, 0.7, 0.6
