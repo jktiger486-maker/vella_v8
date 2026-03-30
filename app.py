@@ -12,17 +12,17 @@ v8 대비 단일 패치:
 - 1차 진입: 시장가 즉시 체결 (2~10차는 지정가 유지)
 - LADDER_ACTIVE 미체결 타임아웃: 5M 12봉 체결 0개 시 철거→WATCHING
 
-[v8.1 패치]
+[v8.2 패치]
 - 5M 트리거 정밀화 (RSI/거래량/캔들패턴 추가 없음)
   cond2_b: 현재봉 고가 EMA 위 0.3% 초과 시 차단 (강한 반등 중 오진입 억제)
-  cond3:   2봉 연속 하락으로 강화 (1봉 노이즈 제거)
+  cond3:   1봉 하락 확정으로 완화 (첫 이탈봉 선점 복구) ← v8.2
 - CFG["MARGIN_TYPE"] 추가: 엔진 시작 시 CROSS/ISOLATED 자동 설정
 
 EXIT 우선순위:
   1. HARD SL
   2. TIMEOUT
-  3. TP1 0.8% → 50% 부분청산 성공 후 SELL ladder 취소 → 트레일링 전환
-  4. TRAIL EXIT: 저점 추적 → +1% 반등 시 전량 청산
+  3. TP1 1% → 50% 부분청산 성공 후 SELL ladder 취소 → 트레일링 전환
+  4. TRAIL EXIT: 저점 추적 → +0.5% 반등 시 전량 청산
   ※ TP1 전: 지정가 EXIT 병행
   ※ TP1 후: 트레일링 EXIT 전용
 
@@ -342,13 +342,12 @@ def check_4h_short_filter(symbol: str, cache: BarCache) -> bool:
 #   cond1  = closes[-1] < ema_s[-1]          — EMA15 아래 종가
 #   cond2  = highs[-2]  > ema_s[-2]          — 기존 "막 이탈한 자리" 정보 유지
 #   cond2_b= highs[-1]  < ema_s[-1] * 1.003  — 현재봉 고가 과반등 차단 (0.3% 버퍼)
-#   cond3  = closes[-1] < closes[-2]          — 2봉 연속 하락 확정
-#              and closes[-2] < closes[-3]
+#   cond3  = closes[-1] < closes[-2]          — 1봉 하락 확정 (첫 이탈봉 허용)
 # ============================================================
 
 def _compute_5m_trigger(closes: list, highs: list) -> bool:
     period = CFG["EMA_TRIGGER_LEN"]
-    if len(closes) < period + 3 or len(highs) < period + 3:
+    if len(closes) < period + 2 or len(highs) < period + 2:
         return False
 
     ema_s = calc_ema(closes, period)
@@ -363,18 +362,18 @@ def _compute_5m_trigger(closes: list, highs: list) -> bool:
     #      정상 이탈봉은 살리고, 강한 반등 중 오진입만 차단
     cond2_b = highs[-1] < ema_s[-1] * 1.003
 
-    # 3) 2봉 연속 하락 확정 (1봉 노이즈 제거)
-    cond3 = closes[-1] < closes[-2] and closes[-2] < closes[-3]
+    # 3) 1봉 하락 확정 (첫 이탈봉 / 바로 다음봉 진입 허용)
+    cond3 = closes[-1] < closes[-2]
 
     triggered = cond1 and cond2 and cond2_b and cond3
 
     if triggered:
         log.info(
-            f"[5M TRIGGER V8.1] EMA 이탈 + 고가 억제(0.3%) + 2봉 하락 | "
+            f"[5M TRIGGER V8.2] EMA 이탈 + 고가 억제(0.3%) + 1봉 하락 | "
             f"close={closes[-1]:.4f}<ema={ema_s[-1]:.4f} | "
             f"high[-2]={highs[-2]:.4f}>ema[-2]={ema_s[-2]:.4f} | "
             f"high[-1]={highs[-1]:.4f}<ema[-1]*1.003={(ema_s[-1]*1.003):.4f} | "
-            f"closes={closes[-3]:.4f}->{closes[-2]:.4f}->{closes[-1]:.4f}"
+            f"closes={closes[-2]:.4f}->{closes[-1]:.4f}"
         )
     return triggered
 
@@ -724,7 +723,7 @@ class RangeShortEngine:
     # --------------------------------------------------------
     def run(self):
         log.info("=" * 60)
-        log.info("VELLA RANGE SHORT LADDER v8.1 시작")
+        log.info("VELLA RANGE SHORT LADDER v8.2 시작")
         log.info(f"심볼: {self.symbol} | 자본: {CFG['TOTAL_CAPITAL_USDT']} USDT | 레버: {CFG['LEVERAGE']}x")
         log.info("=" * 60)
         self._sync_on_start()
@@ -875,7 +874,7 @@ class RangeShortEngine:
 
                 if current_price >= self.trail_low * (1 + CFG["TRAILING_REBOUND_PCT"]):
                     log.info(
-                        f"[TRAIL EXIT] 저점={self.trail_low:.4f} 대비 +1% 반등 "
+                        f"[TRAIL EXIT] 저점={self.trail_low:.4f} 대비 +0.5% 반등 "
                         f"(current={current_price:.4f})"
                     )
                     self._final_close(symbol, position_qty, "TRAIL")
