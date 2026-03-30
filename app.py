@@ -70,7 +70,7 @@ CFG = {
     "MAX_CAPITAL_RATIO":  0.95,
 
     "LADDER_COUNT":   10,
-    "LADDER_GAP_PCT": 0.013,
+    "LADDER_GAP_PCT": 0.02,
     "SIZE_WEIGHTS": [
         1.5, 1.4, 1.3, 1.2, 1.1,
         1.0, 0.9, 0.8, 0.7, 0.6
@@ -78,13 +78,15 @@ CFG = {
 
     "LADDER_INVALIDATION_MULT": 2.0,
 
-    "TP1_PROFIT_PCT":       0.008,
+    # 🔥 수익 구조 (최종 핵심 튜닝)
+    "TP1_PROFIT_PCT":       0.014,
     "TP1_PARTIAL_RATIO":    0.5,
     "TRAILING_REBOUND_PCT": 0.01,
 
+    # 🔥 탈출 구조
     "FEE_PCT_ONEWAY":           0.0004,
-    "TARGET_PROFIT_STAGE_1_3":  0.003,
-    "TARGET_PROFIT_STAGE_4_7":  0.002,
+    "TARGET_PROFIT_STAGE_1_3":  0.005,
+    "TARGET_PROFIT_STAGE_4_7":  0.003,
     "TARGET_PROFIT_STAGE_8_10": -0.0008,
     "EXIT_REPRICE_THRESHOLD_PCT": 0.003,
 
