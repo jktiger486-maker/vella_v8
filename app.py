@@ -62,45 +62,53 @@ ClientError = (BinanceAPIException, BinanceOrderException)
 # CFG
 # ============================================================
 CFG = {
+    # ── 10번대: 심볼 / 시간축 ──────────────────────────────
     "SYMBOL":              "AIOTUSDT",
     "INTERVAL_TRIGGER":    "5m",
     "INTERVAL_EXEC":       "5m",
     "INTERVAL_FILTER_HTF": "4h",
-    "EMA_TRIGGER_LEN":     15,
 
+    # ── 20번대: 트리거 / HTF 필터 ─────────────────────────
+    "EMA_TRIGGER_LEN":    15,
     "HTF_FILTER_EMA_LEN": 15,
     "HTF_FILTER_ENABLE":  True,
 
+    # ── 30번대: 자본 / 레버리지 / 마진 ───────────────────
     "TOTAL_CAPITAL_USDT": 10000.0,
     "LEVERAGE":           3,
     "MARGIN_TYPE":        "CROSS",   # CROSS / ISOLATED
     "MAX_CAPITAL_RATIO":  0.95,
 
+    # ── 40번대: 거미줄 구조 ───────────────────────────────
     "LADDER_COUNT":   10,
     "LADDER_GAP_PCT": 0.02,
     "SIZE_WEIGHTS": [
         0.6, 0.8, 1.1, 1.5, 2.0,
         1.2, 1.0, 0.8, 0.7, 0.6
     ],
-
-    "LADDER_INVALIDATION_MULT": 2.0,
-
-    "TP1_PROFIT_PCT":       0.01,
-    "TP1_PARTIAL_RATIO":    0.5,
-    "TRAILING_REBOUND_PCT": 0.01,
-
-    "FEE_PCT_ONEWAY":           0.0004,
-    "TARGET_PROFIT_STAGE_1_3":  0.005,
-    "TARGET_PROFIT_STAGE_4_7":  0.003,
-    "TARGET_PROFIT_STAGE_8_10": -0.0008,
-    "EXIT_REPRICE_THRESHOLD_PCT": 0.003,
-
-    "DEEP_FILL_STAGE":         8,
-    "TIMEOUT_BARS_AFTER_DEEP": 12,
-    "HARD_SL_PCT":             0.08,
-
+    "LADDER_INVALIDATION_MULT":    2.0,
     "LADDER_NO_FILL_TIMEOUT_BARS": 12,
 
+    # ── 50번대: TP / 트레일링 ─────────────────────────────
+    "TP1_PROFIT_PCT":       0.01,
+    "TP1_PARTIAL_RATIO":    0.5,
+    "TRAILING_REBOUND_PCT": 0.005,
+
+    # ── 60번대: EXIT 가격 구조 ────────────────────────────
+    "FEE_PCT_ONEWAY":            0.0004,
+    "TARGET_PROFIT_STAGE_1_3":   0.012,   # 1~3차: TP1(1%) 백업
+    "TARGET_PROFIT_STAGE_4_5":   0.005,
+    "TARGET_PROFIT_STAGE_6_7":   0.003,
+    "TARGET_PROFIT_STAGE_8_9":   0.001,
+    "TARGET_PROFIT_STAGE_10":   -0.0008,
+    "EXIT_REPRICE_THRESHOLD_PCT": 0.003,
+
+    # ── 70번대: 리스크 / 타임아웃 ────────────────────────
+    "HARD_SL_PCT":             0.05,
+    "DEEP_FILL_STAGE":         8,
+    "TIMEOUT_BARS_AFTER_DEEP": 12,
+
+    # ── 80번대: 운영 / 루프 ───────────────────────────────
     "REENTRY_COOLDOWN_BARS":      8,
     "POLL_INTERVAL_SEC":          10,
     "BAR_CHECK_MIN_INTERVAL_SEC": 40,
@@ -543,8 +551,10 @@ def calc_ladder_quantities(total_capital: float, leverage: float,
 
 def get_stage_target_pct(stage: int) -> float:
     if stage <= 3: return CFG["TARGET_PROFIT_STAGE_1_3"]
-    if stage <= 7: return CFG["TARGET_PROFIT_STAGE_4_7"]
-    return CFG["TARGET_PROFIT_STAGE_8_10"]
+    if stage <= 5: return CFG["TARGET_PROFIT_STAGE_4_5"]
+    if stage <= 7: return CFG["TARGET_PROFIT_STAGE_6_7"]
+    if stage <= 9: return CFG["TARGET_PROFIT_STAGE_8_9"]
+    return CFG["TARGET_PROFIT_STAGE_10"]
 
 def calc_exit_price(avg_price: float, stage: int) -> float:
     return avg_price * (1 - CFG["FEE_PCT_ONEWAY"] * 2 - get_stage_target_pct(stage))
