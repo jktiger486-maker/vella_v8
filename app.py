@@ -1,6 +1,6 @@
 """
 ============================================================
-VELLA RANGE SHORT LADDER v8.7 (BR8 기준선 — TP1 후 SL 10단 조건 통일)
+VELLA RANGE SHORT LADDER v8.8 (BR8 기준선 — 과거신호재진입/SL정상처리/초기화순서)
 ============================================================
 
 [v8.5 패치 내역 — BR10 기준 정렬]
@@ -660,8 +660,7 @@ class RangeShortEngine:
         self._trigger_cache = BarCache(min_interval_sec=min_iv)
 
         load_symbol_filters(self.symbol)
-        set_margin_type(self.symbol, CFG["MARGIN_TYPE"])
-        set_leverage(self.symbol, CFG["LEVERAGE"])
+        # v8.8: margin/leverage 설정은 run()에서 _sync_on_start() 이후 호출
 
     # --------------------------------------------------------
     # 안전 취소
@@ -801,8 +800,10 @@ class RangeShortEngine:
                 self.sl_price    = float(sl_o.get("stopPrice", sl_o.get("price", 0)))
                 log.info(f"[SYNC] SL 복구 | orderId={self.sl_order_id} stopPrice={self.sl_price}")
             else:
-                log.critical("[SYNC FAIL] 포지션 있음 + SL 주문 없음 → 엔진 중단")
-                raise RuntimeError("SL BASE LOST")
+                # v8.8: SL 없음 = 정상 상태 (1~9단 구간은 거래소 SL 없음)
+                log.info("[SYNC] SL 없음 → 정상 상태 (10단 미도달)")
+                self.sl_order_id = None
+                self.sl_price    = None
 
             log.info(
                 f"[SYNC] 복구 완료 | avg={pos['avg_price']} | "
@@ -840,11 +841,18 @@ class RangeShortEngine:
     # --------------------------------------------------------
     def run(self):
         log.info("=" * 60)
-        log.info("VELLA RANGE SHORT LADDER v8.7 시작")
+        log.info("VELLA RANGE SHORT LADDER v8.8 시작")
         log.info(f"심볼: {self.symbol} | 자본: {CFG['TOTAL_CAPITAL_USDT']} USDT | 레버: {CFG['LEVERAGE']}x")
         log.info(f"GAP: {CFG['LADDER_GAP_PCT']*100:.0f}% | HARD_SL: {CFG['HARD_SL_PCT']*100:.0f}%(10단 후 엔진)")
         log.info("=" * 60)
         self._sync_on_start()
+        set_margin_type(self.symbol, CFG["MARGIN_TYPE"])
+        set_leverage(self.symbol, CFG["LEVERAGE"])
+
+        # v8.8: 시작 시 현재 봉 ts 세팅 → 과거 신호 재진입 방지
+        _, bar_ts = calc_ema15_trigger(self.symbol, self._trigger_cache)
+        self.last_trigger_bar_ts = bar_ts
+        log.info(f"[INIT] 시작 봉 ts 세팅 완료: last_trigger_bar_ts={bar_ts}")
         while True:
             try:
                 self._tick()
