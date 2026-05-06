@@ -1,60 +1,63 @@
 """
 ============================================================
-VELLA RANGE SHORT LADDER v8.8 (BR8 기준선 — 과거신호재진입/SL정상처리/초기화순서)
+VELLA RANGE SHORT LADDER v8.9 (ETH 전용 — deep trail 패치)
 ============================================================
 
-[v8.5 패치 내역 — BR10 기준 정렬]
-1. HARD SL → 10단 체결 완료 후에만 발동 (1~9단 엔진 내부 SL 비활성)
-   ※ 거래소 STOP_LIMIT SL은 기존대로 유지 (1단 체결 후 즉시 배치)
-2. TIMEOUT → 사실상 제거 (DEEP_FILL_STAGE=99, TIMEOUT_BARS=99999)
-3. LADDER INVALIDATION → 완전 비활성화
-   - LADDER_ACTIVE 내 _is_ladder_invalid() 호출 제거
-   - POSITION_HOLD 내 pending_sell 무효화 체크 제거
-4. LADDER_NO_FILL_TIMEOUT_BARS: 12 → 99999
-5. TARGET PROFIT 단계별 상향:
-   - 4~5단: 0.5% → 0.8%
-   - 6~7단: 0.3% → 0.6%
-   - 8~9단: 0.1% → 0.4%
-   - 10단:  -0.08% → +0.3%
-6. EXIT_REPRICE_THRESHOLD_PCT: 0.003 → 0.006
-7. GAP: 4% → 5%
-8. SIZE_WEIGHTS: 중간 봉우리형 [0.5, 0.7, 1.0, 1.4, 1.8, 1.4, 1.0, 0.8, 0.6, 0.5]
+[v8.9 패치 내역 — 클로 작성]
+1. 종목 변경: TIAUSDT → ETHUSDT
+2. GAP 변경: 5% → 6% (절대 손절 안 나는 구조)
+3. HARD_SL_PCT 유지: 5% (10단 완료 후 엔진 발동)
 
-[버그 수정 5개]
-B1. TP1 후 max_filled_stage 0 리셋 제거 → stage 유지
-B2. _deploy_ladder() 첫줄 state != WATCHING 차단 추가
-B3. EXIT 생성 조건 max_filled_stage >= 2 추가
-B4. _deploy_ladder() 종료 시 LADDER_ACTIVE 고정 (POSITION_HOLD 직행 제거)
-    ※ 단, 거래소 SL 배치는 order_1st 존재 시 그대로 유지
-B5. _sync_exit_order() 비교 기준 현재값 → 이전값(last_*) 통일
+[핵심 패치 — deep trail]
+A. STAGE_TRAILING_FROM (8단 이상): deep trail 전용 구간
+   - 8단 이상 체결 시 LIMIT EXIT 제거
+   - trail_entry_ref = stage8 주문가 기준 (폴백: current_price)
+   - trail_low 동시 초기화
 
-[기존 v8.4 패치 유지]
-- 거래소 STOP_LIMIT reduceOnly SL 주문 실배치
-- avg_full 고정 계산 + SL_PRICE = avg_full * (1 + HARD_SL_PCT)
-- _reset_sl_order() 헬퍼 + TP1 후 SL 수량 재설정
-- CAPITAL CHECK / 숏 안전밸브 / pending_sell 추적
-- 재시작 sync SL 복구 / 고아 SL 처리
+B. DEEP_TRAIL_ACTIVATE_DROP_PCT (0.8%):
+   - trail_entry_ref 대비 0.8% 이상 하락 시 trail 활성 (ETH 노이즈 보정)
+
+C. TRAILING_REBOUND_STAGE_DEEP (0.6%):
+   - trail_low 대비 0.6% 반등 시 전량 탈출 (ETH 노이즈 보정)
+   - 기존 TP1 트레일링(0.5%)과 별도 운영
+
+D. _sync_exit_order() 개선:
+   - EXIT 직전 _count_filled_stages() 강제 호출
+   - 8단 이상 감지 시 LIMIT EXIT 즉시 취소 후 return
+
+E. 재시작 sync 안전:
+   - trail_entry_ref / trail_low → None으로 재시작
+   - 첫 tick에서 max_filled_stage >= 8 감지 시 자동 재초기화
+
+F. 로그 3종 추가:
+   - [DEEP TRAIL INIT]: trail 시작 시
+   - [DEEP TRAIL ACTIVE]: 매 tick (DEBUG)
+   - [DEEP TRAIL EXIT]: 탈출 시
+
+[v8.8 패치 유지]
+- 과거신호재진입 방지 (last_trigger_bar_ts)
+- HARD SL → 10단 체결 완료 후에만 엔진 발동
+- TIMEOUT 사실상 제거 (DEEP_FILL_STAGE=99)
+- LADDER INVALIDATION 완전 비활성화
+- TARGET PROFIT 단계별 구조 유지
+- EXIT_REPRICE_THRESHOLD_PCT: 0.006
+- SIZE_WEIGHTS: 중간 봉우리형
 
 EXIT 우선순위:
-  1. HARD SL 거래소 STOP_LIMIT (10단 전 구간 담당)
-  2. HARD SL 엔진 내부 백업 (10단 체결 완료 후에만 발동)
+  1. HARD SL 거래소 STOP_LIMIT (10단 완료 후 배치)
+  2. HARD SL 엔진 내부 백업 (10단 완료 후)
   3. TIMEOUT (사실상 비활성)
   4. TP1 1% → 50% 부분청산 후 트레일링 전환
-  5. TRAIL EXIT: 저점 추적 → +0.5% 반등 시 전량 청산
-  ※ TP1 전: 지정가 EXIT 병행 (2단 이상 체결 후)
-  ※ TP1 후: 트레일링 EXIT 전용
+  5. TRAIL EXIT (TP1 후): 저점 +0.5% 반등 시 전량
+  6. DEEP TRAIL EXIT (8단 이상): 저점 +0.6% 반등 시 전량
+  ※ 1~7단: 지정가 EXIT 병행 (2단 이상 체결 후)
+  ※ 8~10단: LIMIT EXIT 제거, deep trail 전용
 
 상태 머신:
   WATCHING       — 포지션 없음. 4H 필터 + 5M 트리거 대기.
-  LADDER_ACTIVE  — 거미줄 배치 완료. 체결 감시 (무효화 없음).
-  POSITION_HOLD  — 포지션 존재. EXIT 동기화 및 최후 방어 관리.
+  LADDER_ACTIVE  — 거미줄 배치 완료. 체결 감시.
+  POSITION_HOLD  — 포지션 존재. EXIT 동기화 및 방어 관리.
   COOLDOWN       — 청산 완료 후 재진입 금지 대기.
-
-재시작 sync:
-  A: 포지션 있음              → POSITION_HOLD, tp1_done=True, trail_low=None
-  B: 포지션 없음 + SELL 주문  → LADDER_ACTIVE, min(price)=entry_price_base
-  C: 포지션 없음 + 주문 없음  → WATCHING
-  ※ SL(STOP_LIMIT) 주문 별도 식별/복구 (orphan SL 자동 취소)
 ============================================================
 """
 
@@ -77,7 +80,7 @@ ClientError = (BinanceAPIException, BinanceOrderException)
 # ============================================================
 CFG = {
     # ── 10번대: 심볼 / 시간축 ──────────────────────────────
-    "SYMBOL":              "TIAUSDT",
+    "SYMBOL":              "ETHUSDT",       # v8.9: TIAUSDT → ETHUSDT
     "INTERVAL_TRIGGER":    "5m",
     "INTERVAL_EXEC":       "5m",
     "INTERVAL_FILTER_HTF": "4h",
@@ -95,35 +98,38 @@ CFG = {
 
     # ── 40번대: 거미줄 구조 ───────────────────────────────
     "LADDER_COUNT":   10,
-    "LADDER_GAP_PCT": 0.05,          # v8.5: 4% → 5%
+    "LADDER_GAP_PCT": 0.06,          # v8.9: 5% → 6%
     "SIZE_WEIGHTS": [
-        0.5, 0.7, 1.0, 1.4, 1.8,    # v8.5: 중간 봉우리형
+        0.5, 0.7, 1.0, 1.4, 1.8,
         1.4, 1.0, 0.8, 0.6, 0.5
     ],
     "LADDER_INVALIDATION_MULT":    2.0,   # 비활성화됨
-    "LADDER_NO_FILL_TIMEOUT_BARS": 99999, # v8.5: 사실상 제거
+    "LADDER_NO_FILL_TIMEOUT_BARS": 99999,
 
     # ── 50번대: TP / 트레일링 ─────────────────────────────
-    "TP1_PROFIT_PCT":       0.01,
-    "TP1_PARTIAL_RATIO":    0.5,
-    "TRAILING_REBOUND_PCT": 0.005,
+    "TP1_PROFIT_PCT":              0.01,
+    "TP1_PARTIAL_RATIO":           0.5,
+    "TRAILING_REBOUND_PCT":        0.005,  # TP1 후 트레일링 (1~7단)
+    "TRAILING_REBOUND_STAGE_DEEP": 0.006,  # v8.9: deep trail 반등 기준 (ETH 노이즈 보정)
+    "STAGE_TRAILING_FROM":         8,      # v8.9: 8단 이상 deep trail
+    "DEEP_TRAIL_ACTIVATE_DROP_PCT":0.008,  # v8.9: 0.8% 하락 시 trail 활성 (ETH 노이즈 보정)
 
     # ── 60번대: EXIT 가격 구조 ────────────────────────────
     "FEE_PCT_ONEWAY":            0.0004,
     "TARGET_PROFIT_STAGE_1_3":   0.012,
-    "TARGET_PROFIT_STAGE_4_5":   0.008,   # v8.5: 0.5% → 0.8%
-    "TARGET_PROFIT_STAGE_6_7":   0.006,   # v8.5: 0.3% → 0.6%
-    "TARGET_PROFIT_STAGE_8_9":   0.004,   # v8.5: 0.1% → 0.4%
-    "TARGET_PROFIT_STAGE_10":    0.003,   # v8.5: -0.08% → +0.3%
-    "EXIT_REPRICE_THRESHOLD_PCT": 0.006,   # v8.5: 0.003 → 0.006
+    "TARGET_PROFIT_STAGE_4_5":   0.008,
+    "TARGET_PROFIT_STAGE_6_7":   0.006,
+    "TARGET_PROFIT_STAGE_8_9":   0.004,
+    "TARGET_PROFIT_STAGE_10":    0.003,
+    "EXIT_REPRICE_THRESHOLD_PCT": 0.006,
 
     # ── 70번대: 리스크 / 타임아웃 ────────────────────────
     "HARD_SL_PCT":             0.05,
     "SL_TICK_BUFFER":          0.003,
     "CAPITAL_CHECK_MIN_RATIO": 0.80,
     "CAPITAL_CHECK_MAX_RATIO": 1.10,
-    "DEEP_FILL_STAGE":         99,     # v8.5: TIMEOUT 사실상 제거
-    "TIMEOUT_BARS_AFTER_DEEP": 99999,  # v8.5: TIMEOUT 사실상 제거
+    "DEEP_FILL_STAGE":         99,
+    "TIMEOUT_BARS_AFTER_DEEP": 99999,
 
     # ── 80번대: 운영 / 루프 ───────────────────────────────
     "REENTRY_COOLDOWN_BARS":      8,
@@ -140,10 +146,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("vella_range_short_v8.log", encoding="utf-8"),
+        logging.FileHandler("vella_range_short_v8_9.log", encoding="utf-8"),
     ]
 )
-log = logging.getLogger("VELLA_BR8")
+log = logging.getLogger("VELLA_BR8_ETH")
 
 # ============================================================
 # 클라이언트
@@ -636,6 +642,9 @@ class RangeShortEngine:
         self.tp1_done:  bool         = False
         self.trail_low: float | None = None
 
+        # v8.9: deep trail 상태변수
+        self.trail_entry_ref: float | None = None
+
         self._filled_order_ids:   set[int] = set()
         self._canceled_order_ids: set[int] = set()
         self._last_position_amt            = 0.0
@@ -660,7 +669,6 @@ class RangeShortEngine:
         self._trigger_cache = BarCache(min_interval_sec=min_iv)
 
         load_symbol_filters(self.symbol)
-        # v8.8: margin/leverage 설정은 run()에서 _sync_on_start() 이후 호출
 
     # --------------------------------------------------------
     # 안전 취소
@@ -794,13 +802,16 @@ class RangeShortEngine:
             self.tp1_done  = True
             self.trail_low = None
 
+            # v8.9: 재시작 시 deep trail 변수 초기화
+            # → 첫 tick에서 max_filled_stage >= STAGE_TRAILING_FROM 감지 시 자동 재초기화
+            self.trail_entry_ref = None
+
             if sl_orders:
                 sl_o = sl_orders[0]
                 self.sl_order_id = int(sl_o["orderId"])
                 self.sl_price    = float(sl_o.get("stopPrice", sl_o.get("price", 0)))
                 log.info(f"[SYNC] SL 복구 | orderId={self.sl_order_id} stopPrice={self.sl_price}")
             else:
-                # v8.8: SL 없음 = 정상 상태 (1~9단 구간은 거래소 SL 없음)
                 log.info("[SYNC] SL 없음 → 정상 상태 (10단 미도달)")
                 self.sl_order_id = None
                 self.sl_price    = None
@@ -841,15 +852,17 @@ class RangeShortEngine:
     # --------------------------------------------------------
     def run(self):
         log.info("=" * 60)
-        log.info("VELLA RANGE SHORT LADDER v8.8 시작")
+        log.info("VELLA RANGE SHORT LADDER v8.9 (ETH) 시작")
         log.info(f"심볼: {self.symbol} | 자본: {CFG['TOTAL_CAPITAL_USDT']} USDT | 레버: {CFG['LEVERAGE']}x")
         log.info(f"GAP: {CFG['LADDER_GAP_PCT']*100:.0f}% | HARD_SL: {CFG['HARD_SL_PCT']*100:.0f}%(10단 후 엔진)")
+        log.info(f"DEEP TRAIL: {CFG['STAGE_TRAILING_FROM']}단 이상 | "
+                 f"DROP: {CFG['DEEP_TRAIL_ACTIVATE_DROP_PCT']*100:.1f}% | "
+                 f"REBOUND: {CFG['TRAILING_REBOUND_STAGE_DEEP']*100:.1f}%")
         log.info("=" * 60)
         self._sync_on_start()
         set_margin_type(self.symbol, CFG["MARGIN_TYPE"])
         set_leverage(self.symbol, CFG["LEVERAGE"])
 
-        # v8.8: 시작 시 현재 봉 ts 세팅 → 과거 신호 재진입 방지
         _, bar_ts = calc_ema15_trigger(self.symbol, self._trigger_cache)
         self.last_trigger_bar_ts = bar_ts
         log.info(f"[INIT] 시작 봉 ts 세팅 완료: last_trigger_bar_ts={bar_ts}")
@@ -923,8 +936,8 @@ class RangeShortEngine:
                 self.state = "WATCHING"
                 return
 
-            # v8.5: LADDER INVALIDATION 완전 비활성화
-            log.info(f"거미줄 대기 | 현재가: {current_price:.4f}")
+            if new_bar:
+                log.info(f"거미줄 대기 | 현재가: {current_price:.4f} | 대기봉: {self.no_fill_bars}")
             return
 
         # ── POSITION_HOLD ──
@@ -959,7 +972,7 @@ class RangeShortEngine:
                 self._last_filled_check_ts = cur_bar_ts
 
                 pending_sell = self._get_pending_sell()
-                log.info(
+                log.debug(
                     f"[POSITION STATUS] "
                     f"pending_sell_count={len(pending_sell)} | "
                     f"max_filled_stage={self.max_filled_stage} | "
@@ -967,24 +980,22 @@ class RangeShortEngine:
                     f"sl_price={self.sl_price}"
                 )
 
-                # v8.6: 수량 변경 시 SL 재설정 — 10단 체결 완료 후에만
                 if (amt_changed and self.sl_price is not None
                         and self.max_filled_stage >= CFG["LADDER_COUNT"]):
                     self._reset_sl_order(new_qty=position_qty)
 
-                # v8.5: POSITION_HOLD 내 INVALIDATION 체크 완전 제거
-
-            log.info(
+            log.debug(
                 f"HOLD | avg={avg_price:.4f} | price={current_price:.4f} | "
                 f"stage={self.max_filled_stage} | qty={position_qty:.4f} | "
                 f"tp1={self.tp1_done} | trail_low={self.trail_low} | "
+                f"trail_entry_ref={self.trail_entry_ref} | "
                 f"closing={self._closing_in_progress} | "
                 f"sl_price={self.sl_price} | sl_order_id={self.sl_order_id}"
             )
 
             pnl_pct = (avg_price - current_price) / avg_price
 
-            # 1. HARD SL 엔진 내부 백업 — v8.5: 10단 체결 완료 후에만 발동
+            # 1. HARD SL 엔진 내부 백업 — 10단 완료 후에만
             if (self.max_filled_stage >= CFG["LADDER_COUNT"]
                     and pnl_pct < -CFG["HARD_SL_PCT"]):
                 log.warning(
@@ -993,7 +1004,7 @@ class RangeShortEngine:
                 self._final_close(symbol, position_qty, "HARD_SL")
                 return
 
-            # 2. TIMEOUT — v8.5: 사실상 비활성 (DEEP_FILL_STAGE=99)
+            # 2. TIMEOUT — 사실상 비활성
             if self.max_filled_stage >= CFG["DEEP_FILL_STAGE"]:
                 if new_bar:
                     self.bars_after_deep += 1
@@ -1007,7 +1018,58 @@ class RangeShortEngine:
                 self._handle_tp1(symbol, position_qty, current_price)
                 return
 
-            # 4. 트레일링
+            # 4. v8.9 DEEP TRAIL — 8단 이상 전용
+            if self.max_filled_stage >= CFG["STAGE_TRAILING_FROM"]:
+                # trail_entry_ref 초기화 (최초 1회)
+                # trail_entry_ref = stage8 주문가 기준 (고정)
+                # trail_low       = 현재가 기준 시작 (sync 복구 왜곡 방지)
+                if self.trail_entry_ref is None:
+                    deep_stage_order = next(
+                        (o for o in self.ladder_orders
+                         if o["stage"] == CFG["STAGE_TRAILING_FROM"]), None
+                    )
+                    ref_price = deep_stage_order["price"] if deep_stage_order else current_price
+                    self.trail_entry_ref = ref_price
+                    self.trail_low       = current_price  # 초기 저점은 현재가 기준 (sync 복구 왜곡 방지)
+                    log.info(
+                        f"[DEEP TRAIL INIT] trail_entry_ref={ref_price:.4f} "
+                        f"(stage{CFG['STAGE_TRAILING_FROM']} 주문가) | "
+                        f"trail_low={self.trail_low:.4f} (현재가 기준)"
+                    )
+
+                # trail_low 갱신
+                self.trail_low = min(self.trail_low, current_price)
+
+                # 하락폭 계산
+                drop_from_entry = (self.trail_entry_ref - self.trail_low) / self.trail_entry_ref
+
+                # 하락폭 로그 — new_bar 기준으로 제한 (로그 폭탄 방지)
+                if new_bar:
+                    log.debug(
+                        f"[DEEP TRAIL ACTIVE] "
+                        f"entry_ref={self.trail_entry_ref:.4f} | "
+                        f"trail_low={self.trail_low:.4f} | "
+                        f"drop={drop_from_entry*100:.2f}% | "
+                        f"필요={CFG['DEEP_TRAIL_ACTIVATE_DROP_PCT']*100:.1f}% | "
+                        f"활성={'YES' if drop_from_entry >= CFG['DEEP_TRAIL_ACTIVATE_DROP_PCT'] else 'NO'}"
+                    )
+
+                # 0.8% 이상 하락 후 0.6% 반등 시 탈출 (ETH 노이즈 보정)
+                if drop_from_entry >= CFG["DEEP_TRAIL_ACTIVATE_DROP_PCT"]:
+                    if current_price >= self.trail_low * (1 + CFG["TRAILING_REBOUND_STAGE_DEEP"]):
+                        log.info(
+                            f"[DEEP TRAIL EXIT] "
+                            f"entry_ref={self.trail_entry_ref:.4f} | "
+                            f"trail_low={self.trail_low:.4f} | "
+                            f"drop={drop_from_entry*100:.2f}% | "
+                            f"current={current_price:.4f} | "
+                            f"반등={((current_price/self.trail_low)-1)*100:.2f}%"
+                        )
+                        self._final_close(symbol, position_qty, "DEEP_TRAIL")
+                        return
+                return
+
+            # 5. TP1 후 트레일링 (1~7단)
             if self.tp1_done:
                 if self.trail_low is None:
                     self.trail_low = current_price
@@ -1023,8 +1085,7 @@ class RangeShortEngine:
                     self._final_close(symbol, position_qty, "TRAIL")
                 return
 
-            # 5. 지정가 EXIT 동기화
-            # v8.5: 2단 이상 체결 후에만 EXIT 생성
+            # 6. 지정가 EXIT 동기화 (1~7단, 2단 이상 체결 후)
             if not self._closing_in_progress and self.max_filled_stage >= 2:
                 self._sync_exit_order(symbol, avg_price, position_qty)
 
@@ -1047,14 +1108,11 @@ class RangeShortEngine:
             self._cancel_ladder_orders()
             self.ladder_orders     = []
             self._filled_order_ids = set()
-            # v8.5 B1: max_filled_stage 유지 — TP1 후 stage 기반 EXIT 정확도 보존
-            # (0 리셋 시 이후 EXIT가 항상 1단 기준 계산되는 버그 방지)
 
             self._last_position_amt = pos["amt"]
             self.tp1_done  = True
             self.trail_low = None
 
-            # v8.7: TP1 후 SL 재설정 — 10단 체결 완료 후에만 활성
             if self.max_filled_stage >= CFG["LADDER_COUNT"]:
                 self._reset_sl_order(new_qty=pos["amt"])
 
@@ -1086,6 +1144,7 @@ class RangeShortEngine:
             self._closing_in_progress = False
             self._start_cooldown()
         else:
+            self._closing_in_progress = False  # 다음 tick 재시도 허용
             log.error(
                 f"[FINAL CLOSE] 청산 실패 → POSITION_HOLD 유지, 다음 tick 재시도 "
                 f"(사유={reason})"
@@ -1095,7 +1154,6 @@ class RangeShortEngine:
     # 거미줄 배치
     # --------------------------------------------------------
     def _deploy_ladder(self, current_price: float):
-        # v8.5 B2: 중복 진입 차단
         if self.state != "WATCHING":
             log.warning(f"_deploy_ladder 차단: state={self.state} (WATCHING 아님)")
             return
@@ -1179,11 +1237,8 @@ class RangeShortEngine:
 
         log.info(f"거미줄 배치 완료: {success}/{count}개 → LADDER_ACTIVE")
         self.no_fill_bars = 0
-        # v8.5 B4: LADDER_ACTIVE 고정 — POSITION_HOLD 직행 금지
         self.state = "LADDER_ACTIVE"
 
-        # v8.6: 거래소 SL 배치 — 10단 체결 완료 후에만 활성
-        # (1~9단 구간은 거래소 SL도 없음 → BR10 철학 완전 일치)
         if order_1st and self.max_filled_stage >= CFG["LADDER_COUNT"]:
             pos_now = get_position(symbol)
             if self.avg_full is not None and pos_now["avg_price"] > 0:
@@ -1197,7 +1252,6 @@ class RangeShortEngine:
     # 거미줄 무효화 (비활성화됨 — 참조용 유지)
     # --------------------------------------------------------
     def _is_ladder_invalid(self, current_price: float) -> bool:
-        # v8.5: 전략 철학상 호출되지 않음
         if not self.entry_price_base or not self.ladder_orders:
             return False
         top_price  = self.ladder_orders[-1]["price"]
@@ -1205,15 +1259,32 @@ class RangeShortEngine:
         return current_price > top_price * (1 + buffer_pct)
 
     # --------------------------------------------------------
-    # 지정가 EXIT 동기화
+    # 지정가 EXIT 동기화 (1~7단 전용)
     # --------------------------------------------------------
     def _sync_exit_order(self, symbol: str, avg_price: float, position_qty: float):
+
+        # v8.9: EXIT 직전 stage 강제 최신화
+        filled_now = self._count_filled_stages()
+        if filled_now > self.max_filled_stage:
+            log.info(f"[EXIT SYNC] stage 강제 갱신: {self.max_filled_stage} → {filled_now}")
+            self.max_filled_stage = filled_now
+
+        # v8.9: 8단 이상 → deep trail 전용, LIMIT EXIT 차단
+        if self.max_filled_stage >= CFG["STAGE_TRAILING_FROM"]:
+            if self.exit_order_ids:
+                log.info(
+                    f"[EXIT SYNC] stage={self.max_filled_stage} >= {CFG['STAGE_TRAILING_FROM']} "
+                    f"→ LIMIT EXIT 취소, deep trail 전환"
+                )
+                self.cancel_buy_exit_orders(self.exit_order_ids)
+                self.exit_order_ids = []
+            return
+
         stage      = max(self.max_filled_stage, 1)
         exit_price = calc_exit_price(avg_price, stage)
         exit_qty   = abs(position_qty)
         threshold  = CFG["EXIT_REPRICE_THRESHOLD_PCT"]
 
-        # v8.5 B5: 비교 기준 이전값(last_*)으로 통일
         need_replace = (
             not self.exit_order_ids
             or stage != self.last_stage
@@ -1261,6 +1332,7 @@ class RangeShortEngine:
         self._last_filled_check_ts  = 0
         self.tp1_done               = False
         self.trail_low              = None
+        self.trail_entry_ref        = None   # v8.9
         self.avg_full               = None
         self.sl_price               = None
         self.sl_order_id            = None
