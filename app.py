@@ -1,10 +1,10 @@
 """
 ============================================================
-VELLA RANGE SHORT LADDER v8.9 (ETH 전용 — deep trail 패치)
+VELLA RANGE SHORT LADDER v8.9 (deep trail 패치)
 ============================================================
 
 [v8.9 패치 내역 — 클로 작성]
-1. 종목 변경: TIAUSDT → ETHUSDT
+1. 종목 변경: TIAUSDT → SOLUSDT
 2. GAP 변경: 5% → 6% (절대 손절 안 나는 구조)
 3. HARD_SL_PCT 유지: 5% (10단 완료 후 엔진 발동)
 
@@ -15,10 +15,10 @@ A. STAGE_TRAILING_FROM (8단 이상): deep trail 전용 구간
    - trail_low 동시 초기화
 
 B. DEEP_TRAIL_ACTIVATE_DROP_PCT (0.8%):
-   - trail_entry_ref 대비 0.8% 이상 하락 시 trail 활성 (ETH 노이즈 보정)
+   - trail_entry_ref 대비 0.8% 이상 하락 시 trail 활성 (노이즈 보정)
 
 C. TRAILING_REBOUND_STAGE_DEEP (0.6%):
-   - trail_low 대비 0.6% 반등 시 전량 탈출 (ETH 노이즈 보정)
+   - trail_low 대비 0.6% 반등 시 전량 탈출 (노이즈 보정)
    - 기존 TP1 트레일링(0.5%)과 별도 운영
 
 D. _sync_exit_order() 개선:
@@ -80,7 +80,7 @@ ClientError = (BinanceAPIException, BinanceOrderException)
 # ============================================================
 CFG = {
     # ── 10번대: 심볼 / 시간축 ──────────────────────────────
-    "SYMBOL":              "ETHUSDT",       # v8.9: TIAUSDT → ETHUSDT
+    "SYMBOL":              "SOLUSDT",       # v8.9: TIAUSDT → SOLUSDT
     "INTERVAL_TRIGGER":    "5m",
     "INTERVAL_EXEC":       "5m",
     "INTERVAL_FILTER_HTF": "4h",
@@ -110,9 +110,9 @@ CFG = {
     "TP1_PROFIT_PCT":              0.01,
     "TP1_PARTIAL_RATIO":           0.5,
     "TRAILING_REBOUND_PCT":        0.005,  # TP1 후 트레일링 (1~7단)
-    "TRAILING_REBOUND_STAGE_DEEP": 0.006,  # v8.9: deep trail 반등 기준 (ETH 노이즈 보정)
+    "TRAILING_REBOUND_STAGE_DEEP": 0.006,  # v8.9: deep trail 반등 기준 (노이즈 보정)
     "STAGE_TRAILING_FROM":         8,      # v8.9: 8단 이상 deep trail
-    "DEEP_TRAIL_ACTIVATE_DROP_PCT":0.008,  # v8.9: 0.8% 하락 시 trail 활성 (ETH 노이즈 보정)
+    "DEEP_TRAIL_ACTIVATE_DROP_PCT":0.008,  # v8.9: 0.8% 하락 시 trail 활성 (노이즈 보정)
 
     # ── 60번대: EXIT 가격 구조 ────────────────────────────
     "FEE_PCT_ONEWAY":            0.0004,
@@ -149,7 +149,7 @@ logging.basicConfig(
         logging.FileHandler("vella_range_short_v8_9.log", encoding="utf-8"),
     ]
 )
-log = logging.getLogger("VELLA_BR8_ETH")
+log = logging.getLogger("VELLA_BR8_SOL")
 
 # ============================================================
 # 클라이언트
@@ -852,7 +852,7 @@ class RangeShortEngine:
     # --------------------------------------------------------
     def run(self):
         log.info("=" * 60)
-        log.info("VELLA RANGE SHORT LADDER v8.9 (ETH) 시작")
+        log.info("VELLA RANGE SHORT LADDER v8.9 (SOL) 시작")
         log.info(f"심볼: {self.symbol} | 자본: {CFG['TOTAL_CAPITAL_USDT']} USDT | 레버: {CFG['LEVERAGE']}x")
         log.info(f"GAP: {CFG['LADDER_GAP_PCT']*100:.0f}% | HARD_SL: {CFG['HARD_SL_PCT']*100:.0f}%(10단 후 엔진)")
         log.info(f"DEEP TRAIL: {CFG['STAGE_TRAILING_FROM']}단 이상 | "
@@ -1054,7 +1054,7 @@ class RangeShortEngine:
                         f"활성={'YES' if drop_from_entry >= CFG['DEEP_TRAIL_ACTIVATE_DROP_PCT'] else 'NO'}"
                     )
 
-                # 0.8% 이상 하락 후 0.6% 반등 시 탈출 (ETH 노이즈 보정)
+                # 0.8% 이상 하락 후 0.6% 반등 시 탈출 (노이즈 보정)
                 if drop_from_entry >= CFG["DEEP_TRAIL_ACTIVATE_DROP_PCT"]:
                     if current_price >= self.trail_low * (1 + CFG["TRAILING_REBOUND_STAGE_DEEP"]):
                         log.info(
